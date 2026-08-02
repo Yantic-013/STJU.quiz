@@ -1,12 +1,18 @@
 /* ================================================================
    Service Worker — 刷题助手离线缓存
    ================================================================ */
-const CACHE_NAME = 'quiz-app-v12';
+const CACHE_NAME = 'quiz-app-v17';
 
 // 需要预缓存的核心资源
-const urlsToCache = [
+const coreUrls = [
   './',
   './index.html',
+  './styles.css',
+  './app.js',
+  './data/default-questions.js'
+];
+
+const externalUrls = [
   'https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js',
   'https://cdn.jsdelivr.net/npm/localforage@1.10.0/dist/localforage.min.js',
   'https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap'
@@ -16,8 +22,12 @@ const urlsToCache = [
 self.addEventListener('install', function(e) {
   e.waitUntil(
     caches.open(CACHE_NAME).then(function(cache) {
-      return cache.addAll(urlsToCache).catch(function() {
-        // 某些 CDN 资源可能缓存失败，不阻塞安装
+      return cache.addAll(coreUrls).then(function() {
+        return Promise.all(externalUrls.map(function(url) {
+          return cache.add(url).catch(function() {
+            // 某些 CDN 资源可能缓存失败，不阻塞本地核心资源安装
+          });
+        }));
       });
     })
   );

@@ -1,30 +1,32 @@
-# CLAUDE.md - 刷题网站项目
+# 刷题助手项目说明
 
 ## 项目概述
-纯前端刷题网站，单 HTML 文件，浏览器直接运行。
 
-## 标准文件路径
+这是部署在 GitHub Pages 的纯前端刷题应用。项目不使用框架、构建工具或后端，浏览器可直接加载静态文件。
 
-| 文件 | 路径 | 说明 |
-|------|------|------|
-| 主应用 | `quiz-app.html` | 唯一代码文件 |
-| 需求文档 | `docs/requirements.md` | 功能需求规格 |
-| 技术规范 | `docs/tech-spec.md` | 技术选型与数据设计 |
-| UI 规范 | `docs/ui-design.md` | 配色、布局、组件规范 |
-| 开发步骤 | `docs/dev-steps.md` | 分阶段执行步骤 |
-| 开发日志 | `dev-log/` | 每日开发记录 |
-| 题库模板 | `templates/题库模板.xlsx` | Excel 导入模板 |
+## 目录结构
 
-## 工作约定
-1. 分阶段推进，每阶段完成并能验证后再进入下一阶段
-2. 每次开发结束后更新 `dev-log/YYYY-MM-DD.md`，记录完成事项和待办事项
-3. 所有代码在 `quiz-app.html` 单文件中，不拆分为多个文件
-4. 修改代码前先阅读 `docs/` 下的规范文档，确保实现符合设计
-5. 功能完成后在浏览器中实际验证，不从代码层面假设"应该没问题"
+| 路径 | 说明 |
+|---|---|
+| `index.html` | 页面结构与导航 |
+| `styles.css` | 全局样式与响应式布局 |
+| `app.js` | 数据迁移、导入、答题和页面逻辑 |
+| `data/default-questions.js` | 机械设计与机械原理两套内置默认题库（共 860 道） |
+| `sw.js` | GitHub Pages 子路径兼容的离线缓存 |
+| `docs/` | 需求、技术和 UI 说明 |
+| `templates/题库模板.xlsx` | Excel 导入模板 |
 
 ## 技术约束
-- 纯前端，无后端，无框架，无构建工具
-- 数据存储：localStorage
-- Excel 导入：SheetJS CDN (`https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js`)  — 必须使用！不允许替代库
-- CSS 不使用任何 UI 框架（Bootstrap 等），全部手写
-- 不引入任何 npm 依赖
+
+- 纯静态前端，无 npm 依赖、无编译步骤。
+- Excel 解析固定使用 SheetJS 0.20.1 CDN。
+- 持久化使用 localForage（IndexedDB），仅保留旧 localStorage 数据迁移逻辑。
+- 题型统一为 `single`、`multi`、`fill`。
+- 题图既可来自 Excel 的图片字段，也可按“题目 ID = 图片文件名”批量关联。
+- 修改后至少执行 `node --check app.js`、`node --check sw.js`，并在本地 HTTP 服务中验证。
+
+## 数据安全
+
+- 增量导入按题目 ID 优先更新，否则按“章节 + 题干”匹配。
+- 清空题库时保留内置默认题库；导出完整备份包含题库、错题、收藏、设置和本地题图。
+- `outputs/` 是本地题库工作区，不提交 Git。

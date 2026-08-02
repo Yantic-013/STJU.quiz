@@ -1,58 +1,52 @@
-# 技术设计规范
+# 技术设计
 
-## 技术栈
-- **架构**：纯前端单文件 (HTML + CSS + JS)
-- **数据存储**：浏览器 localStorage
-- **Excel 解析**：SheetJS (xlsx) CDN 引入
-- **版本**：xlsx 0.20.1
-- **无构建工具，无框架，无 npm 依赖**
+## 架构
 
-## 数据模型
+- 静态文件：`index.html` + `styles.css` + `app.js` + `data/default-questions.js`。
+- 第三方脚本：SheetJS 0.20.1、localForage 1.10.0，均通过 CDN 加载。
+- 数据存储：localForage/IndexedDB；启动时兼容迁移旧 localStorage。
+- 当前数据版本：`v14`。
+- 内置默认题库：机械设计 459 道、机械原理 401 道，共 860 道。
 
-### 题库数据 (localStorage key: `questionBank`)
-```js
-[
-  {
-    id: "uuid",           // 唯一标识
-    chapter: "第一章 概述",
-    type: "single",       // "single" | "multi"
-    question: "题目文本",
-    options: ["选项1", "选项2", "选项3", "选项4"],  // 原始顺序（显示时打乱）
-    answer: ["A"],        // 正确答案索引数组，单选 ["A"]，多选 ["A","C"]
-    explanation: "解析文本"
-  }
-]
-```
+## 题目模型
 
-### 错题集 (localStorage key: `errorBook`)
-```js
-[
-  {
-    questionId: "uuid",   // 关联题目 id
-    wrongCount: 3,        // 错误次数
-    lastWrong: "2026-06-06",  // 最后错误日期
-  }
-]
-```
-
-### 用户设置 (localStorage key: `settings`)
 ```js
 {
-  memorizationMode: false
+  id: 'JX-LG-001',
+  source: '机械原理',
+  chapter: '机械原理 - 第一章',
+  type: 'single', // single | multi | fill
+  question: '题干',
+  options: ['选项 A', '选项 B'], // 填空题为空数组
+  answer: ['A'], // 填空题按空位存文本答案
+  explanation: '解析',
+  image: '',
+  topic: '',
+  page: '',
+  localNumber: '',
+  globalNumber: ''
 }
 ```
 
-## Excel 解析规则
-- 读取第一行作为表头
-- 必填列：章节、题型、题目、选项A、选项B、选项C、选项D、正确答案
-- 选填列：解析、选项E、选项F...（程序自动检测非空列头）
-- 选项列识别：列头匹配 `选项[A-Z]` 且内容非空的列
-- 正确答案解析：按逗号分割 → 去空格 → 转为大写字母数组
-- 跳过题目为空的空行
+## 持久化键
 
-## localStorage 键名
-| 键名 | 内容 |
-|------|------|
-| `questionBank` | 题库数组 |
-| `errorBook` | 错题集数组 |
-| `settings` | 用户设置对象 |
+| 键 | 内容 |
+|---|---|
+| `questionBank` | 标准化题目数组 |
+| `errorBook` | `{ questionId, wrongCount, lastWrong }[]` |
+| `bookmarks` | 收藏题目 ID 数组 |
+| `settings` | 主题与 `dbVersion` |
+| `questionImages` | `{ [questionId]: dataUrl }` |
+
+## Excel 解析
+
+1. 以二维数组读取首个工作表。
+2. 搜索真实表头行，不假定第一行是表头。
+3. 识别必填列和可选元数据列。
+4. 选择题将字母答案映射到非空选项；填空题根据题干空位数量拆分答案。
+5. 标准化并执行增量更新，最后一次性持久化。
+
+## 部署
+
+- `sw.js` 的作用域使用 `./`，适配 `/my-quiz-app/` 子路径。
+- Service Worker 安装时本地核心文件必须成功缓存；CDN 资源失败不阻断安装。

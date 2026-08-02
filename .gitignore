@@ -1,0 +1,12 @@
+# Local question-bank artifacts and source photos
+outputs/
+
+# Temporary inspection and conversion workspaces
+.tmp-*/
+tmp_*/
+
+# One-off logs and workflow notes
+*.log
+task_plan.md
+progress.md
+findings.md
