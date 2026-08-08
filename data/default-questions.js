@@ -14513,6 +14513,7 @@ window.DEFAULT_QUESTIONS = [
       "机器",
       "机构"
     ],
+    "answerOrder": "any",
     "explanation": "",
     "topic": "机械原理的研究对象及内容【普通考点】",
     "page": "176",

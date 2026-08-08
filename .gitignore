@@ -4,6 +4,7 @@ outputs/
 # Temporary inspection and conversion workspaces
 .tmp-*/
 tmp_*/
+stitch-export/
 
 # One-off logs and workflow notes
 *.log

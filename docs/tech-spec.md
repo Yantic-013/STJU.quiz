@@ -2,10 +2,10 @@
 
 ## 架构
 
-- 静态文件：`index.html` + `styles.css` + `app.js` + `data/default-questions.js`。
+- 静态文件：`index.html` + `styles.css` + `stitch-ui.css` + `app.js` + `data/default-questions.js`。
 - 第三方脚本：SheetJS 0.20.1、localForage 1.10.0，均通过 CDN 加载。
 - 数据存储：localForage/IndexedDB；启动时兼容迁移旧 localStorage。
-- 当前数据版本：`v14`。
+- 当前数据版本：`v16`。
 - 内置默认题库：机械设计 459 道、机械原理 401 道，共 860 道。
 
 ## 题目模型
@@ -15,10 +15,11 @@
   id: 'JX-LG-001',
   source: '机械原理',
   chapter: '机械原理 - 第一章',
-  type: 'single', // single | multi | fill
+  type: 'single', // single | fill；导入的 multi 会被跳过
   question: '题干',
   options: ['选项 A', '选项 B'], // 填空题为空数组
   answer: ['A'], // 填空题按空位存文本答案
+  answerOrder: 'fixed', // 填空题可设为 any，表示各空答案顺序可交换
   explanation: '解析',
   image: '',
   topic: '',
@@ -43,7 +44,7 @@
 1. 以二维数组读取首个工作表。
 2. 搜索真实表头行，不假定第一行是表头。
 3. 识别必填列和可选元数据列。
-4. 选择题将字母答案映射到非空选项；填空题根据题干空位数量拆分答案。
+4. 单选题将字母答案映射到非空选项；填空题根据题干空位数量拆分答案；可选“答案顺序”列支持“可交换/任意”。
 5. 标准化并执行增量更新，最后一次性持久化。
 
 ## 部署

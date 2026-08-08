@@ -79,6 +79,12 @@ function normalizeQuestionType(value) {
   return 'single';
 }
 
+function normalizeAnswerOrder(value) {
+  const order = String(value || '').trim().toLowerCase();
+  const flexibleLabels = ['any', 'unordered', '任意', '可交换', '无序', '不分顺序', '顺序不限'];
+  return flexibleLabels.some(label => order === label || order.includes(label)) ? 'any' : 'fixed';
+}
+
 function questionTypeMeta(type) {
   return QUESTION_TYPE_META[normalizeQuestionType(type)];
 }
@@ -96,6 +102,7 @@ function normalizeQuestion(question) {
     question: String(question.question || '').trim(),
     options: type === 'fill' ? [] : (Array.isArray(question.options) ? question.options.map(String) : []),
     answer: rawAnswer.map(value => String(value || '').trim()).filter(Boolean),
+    answerOrder: type === 'fill' ? normalizeAnswerOrder(question.answerOrder) : 'fixed',
     explanation: String(question.explanation || '').trim(),
     image: String(question.image || '').trim()
   };
@@ -121,18 +128,37 @@ function normalizeAnswerText(value) {
     .replace(/[\s,，。；;、:："“”'‘’（）()【】\[\]]+/g, '');
 }
 
-function isFillAnswerCorrect(userAnswer, correctAnswer) {
+function isFillAnswerCorrect(userAnswer, correctAnswer, answerOrder = 'fixed') {
   const user = (userAnswer || []).map(normalizeAnswerText).filter(Boolean);
   const correct = (correctAnswer || []).map(value => String(value || '').trim()).filter(Boolean);
+  const isFlexibleOrder = normalizeAnswerOrder(answerOrder) === 'any';
   if (!user.length || !correct.length) return false;
 
   if (user.length === correct.length) {
+    if (isFlexibleOrder) {
+      const expectedVariants = correct.map(expected =>
+        expected.split(/[|｜/]/).map(normalizeAnswerText).filter(Boolean)
+      );
+      const used = new Array(user.length).fill(false);
+      const matchNext = expectedIndex => {
+        if (expectedIndex === expectedVariants.length) return true;
+        for (let userIndex = 0; userIndex < user.length; userIndex++) {
+          if (used[userIndex] || !expectedVariants[expectedIndex].includes(user[userIndex])) continue;
+          used[userIndex] = true;
+          if (matchNext(expectedIndex + 1)) return true;
+          used[userIndex] = false;
+        }
+        return false;
+      };
+      return matchNext(0);
+    }
     return correct.every((expected, index) => {
       const variants = expected.split(/[|｜/]/).map(normalizeAnswerText).filter(Boolean);
       return variants.includes(user[index]);
     });
   }
 
+  if (isFlexibleOrder) return false;
   return normalizeAnswerText(user.join('')) === normalizeAnswerText(correct.join(''));
 }
 
@@ -156,6 +182,7 @@ function renderQuestionImage(question, className = 'question-image') {
 }
 
 const DEFAULT_QUESTIONS = window.DEFAULT_QUESTIONS || [];
+const RETIRED_CHAPTERS = new Set(['第一章 绪论', '第二章 基础']);
 
 let questionBank = [];
 let errorBook = [];
@@ -280,6 +307,36 @@ async function initData() {
       migrated = true;
     }
 
+    // v15：为填空题增加答案顺序规则，并同步内置题库中的可交换标记。
+    if ((parseInt(String(settings.dbVersion || '').replace(/\D/g, ''), 10) || 0) < 15) {
+      const defaultAnswerOrders = new Map(
+        DEFAULT_QUESTIONS.map(question => [String(question.id), normalizeAnswerOrder(question.answerOrder)])
+      );
+      questionBank = questionBank.map(question => {
+        const normalized = normalizeQuestion(question);
+        return defaultAnswerOrders.has(normalized.id)
+          ? { ...normalized, answerOrder: defaultAnswerOrders.get(normalized.id) }
+          : normalized;
+      });
+      settings.dbVersion = 'v15';
+      migrated = true;
+    }
+
+    // v16：移除不再使用的示例章节，并停用多选题数据。
+    if ((parseInt(String(settings.dbVersion || '').replace(/\D/g, ''), 10) || 0) < 16) {
+      questionBank = questionBank
+        .map(normalizeQuestion)
+        .filter(question => question.question && !RETIRED_CHAPTERS.has(question.chapter) && question.type !== 'multi');
+      const validIds = new Set(questionBank.map(question => question.id));
+      errorBook = errorBook.filter(entry => validIds.has(entry.questionId));
+      bookmarks = bookmarks.filter(id => validIds.has(id));
+      questionImages = Object.fromEntries(
+        Object.entries(questionImages).filter(([id]) => validIds.has(id))
+      );
+      settings.dbVersion = 'v16';
+      migrated = true;
+    }
+
     if (migrated || isNewUser) {
       console.log(isNewUser ? 'Loaded default embedded question bank.' : 'Migrated old localStorage data to IndexedDB.');
       await persist();
@@ -302,13 +359,61 @@ async function persist() {
    ================================================================ */
 let currentPage = 'practice';
 
-document.getElementById('navBar').addEventListener('click', function(e) {
-  const item = e.target.closest('.nav-item');
-  if (!item) return;
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  item.classList.add('active');
-  currentPage = item.dataset.page;
+function icon(name, className = '') {
+  return `<span class="material-symbols-outlined ${className}" aria-hidden="true">${name}</span>`;
+}
+
+function showConfirmDialog({ title, message, confirmText = '确认', cancelText = '取消', danger = false }) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirmDialogTitle">
+        <div class="modal-head">
+          <div><div class="modal-title" id="confirmDialogTitle">${esc(title)}</div><p class="modal-subtitle">请确认后继续</p></div>
+          <button type="button" class="icon-button modal-close" data-confirm="cancel" aria-label="关闭">${icon('close')}</button>
+        </div>
+        <div class="modal-body"><p class="confirm-message">${esc(message).replace(/\n/g, '<br>')}</p></div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-confirm="cancel">${esc(cancelText)}</button>
+          <button type="button" class="btn ${danger ? 'btn-destructive' : 'btn-primary'}" data-confirm="ok">${esc(confirmText)}</button>
+        </div>
+      </div>`;
+    const finish = value => { overlay.remove(); resolve(value); };
+    overlay.addEventListener('click', event => {
+      const action = event.target.closest('[data-confirm]')?.dataset.confirm;
+      if (action) finish(action === 'ok');
+      else if (event.target === overlay) finish(false);
+    });
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-confirm="ok"]')?.focus();
+  });
+}
+
+function syncNavigation() {
+  document.querySelectorAll('[data-page]').forEach(item => {
+    item.classList.toggle('active', item.dataset.page === currentPage);
+    if (item.classList.contains('nav-item')) {
+      item.setAttribute('aria-current', item.dataset.page === currentPage ? 'page' : 'false');
+    }
+  });
+}
+
+function closeMobileSidebar() {
+  document.body.classList.remove('sidebar-open');
+}
+
+function navigateTo(page) {
+  currentPage = page;
+  closeMobileSidebar();
   renderPage();
+}
+
+document.addEventListener('click', function(e) {
+  const item = e.target.closest('[data-page]');
+  if (!item) return;
+  e.preventDefault();
+  navigateTo(item.dataset.page);
 });
 
 /* ================================================================
@@ -316,6 +421,9 @@ document.getElementById('navBar').addEventListener('click', function(e) {
    ================================================================ */
 function renderPage() {
   const c = $id('container');
+  document.body.classList.remove('quiz-active', 'result-active');
+  c.className = `container app-container page-${currentPage}`;
+  syncNavigation();
   switch (currentPage) {
     case 'practice': renderChapterList(c); break;
     case 'exam-config': renderExamConfig(c); break;
@@ -324,6 +432,7 @@ function renderPage() {
     case 'search': renderSearch(c); break;
     case 'manage': renderManage(c); break;
   }
+  window.scrollTo({ top: 0, behavior: 'instant' });
 }
 
 /* ================================================================
@@ -332,7 +441,6 @@ function renderPage() {
 function renderManage(container) {
   const chapters = getChapters();
   const totalSingle = questionBank.filter(q => q.type === 'single').length;
-  const totalMulti = questionBank.filter(q => q.type === 'multi').length;
   const totalFill = questionBank.filter(q => q.type === 'fill').length;
   const imageCount = questionBank.filter(q => questionImageSource(q)).length;
   let chaptersHtml = '';
@@ -342,74 +450,51 @@ function renderManage(container) {
     chaptersHtml = chapters.map(ch => {
       const qs = questionBank.filter(q => q.chapter === ch);
       const single = qs.filter(q => q.type === 'single').length;
-      const multi = qs.filter(q => q.type === 'multi').length;
       const fill = qs.filter(q => q.type === 'fill').length;
-      return `<div class="chapter-card" style="cursor:default">
-        <div class="chapter-card-num">${chapters.indexOf(ch)+1}</div>
-        <span class="chapter-card-name">${esc(ch)}</span>
-        <span class="chapter-card-badge">单选 ${single} · 多选 ${multi} · 填空 ${fill}</span>
-      </div>`;
+      return `<div class="management-chapter-row"><strong>${String(chapters.indexOf(ch) + 1).padStart(2, '0')} · ${esc(ch)}</strong><span>单选 ${single} · 填空 ${fill}</span></div>`;
     }).join('');
   }
 
   container.innerHTML = `
-    <div class="card">
-      <h2 style="font-size:22px; font-weight:700; margin-bottom:24px;">题库管理</h2>
-
-      <div class="stats-row" style="margin-bottom:28px">
-        <div class="manage-stat-item"><div class="manage-stat-num">${questionBank.length}</div><div class="manage-stat-label">总题数</div></div>
-        <div class="manage-stat-item"><div class="manage-stat-num">${totalSingle + totalMulti}</div><div class="manage-stat-label">选择题</div></div>
-        <div class="manage-stat-item"><div class="manage-stat-num">${totalFill}</div><div class="manage-stat-label">填空题</div></div>
-        <div class="manage-stat-item"><div class="manage-stat-num">${imageCount}</div><div class="manage-stat-label">已关联题图</div></div>
-        <div class="manage-stat-item"><div class="manage-stat-num">${countValidErrors()}</div><div class="manage-stat-label">错题数</div></div>
-      </div>
-
-      <div class="upload-zone-lg" id="uploadZone">
-        <div class="upload-zone-lg-icon">📂</div>
-        <div class="upload-zone-lg-title">点击或拖拽 Excel 题库文件到此处</div>
-        <div class="upload-zone-lg-sub">支持 .xlsx 格式 · 重复题目自动跳过</div>
-        <input type="file" id="fileInput" accept=".xlsx" style="display:none">
-      </div>
-
-      <div id="importMsg" style="margin-top:16px;"></div>
-
-      <div class="image-upload-row">
-        <div>
-          <strong>题图关联</strong>
-          <p>图片文件名需与题目 ID 一致，例如 <code>JX-LG-029.png</code>。可一次选择多张。</p>
+    <div class="page-heading"><div><h1>题库管理</h1><p>管理本地题目数据、题图与备份。所有数据仅保存在当前设备。</p></div></div>
+    <div class="manage-overview">
+      <div class="manage-stat-item"><span class="manage-stat-icon">${icon('database')}</span><div class="manage-stat-label">题库总量</div><div class="manage-stat-num">${questionBank.length.toLocaleString()}</div></div>
+      <div class="manage-stat-item"><span class="manage-stat-icon">${icon('menu_book')}</span><div class="manage-stat-label">章节数量</div><div class="manage-stat-num">${chapters.length}</div></div>
+      <div class="manage-stat-item"><span class="manage-stat-icon">${icon('image')}</span><div class="manage-stat-label">关联题图</div><div class="manage-stat-num">${imageCount}</div></div>
+      <div class="manage-stat-item"><span class="manage-stat-icon">${icon('error')}</span><div class="manage-stat-label">待复习错题</div><div class="manage-stat-num">${countValidErrors()}</div></div>
+    </div>
+    <div class="manage-main-grid">
+      <section class="card manage-card">
+        <div class="manage-card-title"><h2>${icon('upload_file')} 数据导入</h2><span class="text-button">支持 Excel</span></div>
+        <div class="upload-zone-lg" id="uploadZone">
+          <div class="upload-zone-lg-icon">${icon('cloud_upload')}</div>
+          <div class="upload-zone-lg-title">将 Excel 文件拖到此处，或点击上传</div>
+          <div class="upload-zone-lg-sub">支持 .xlsx 文件，单个文件最大 50MB</div>
+          <button type="button" class="btn btn-primary">选择文件</button>
+          <input type="file" id="fileInput" accept=".xlsx" hidden>
         </div>
-        <button class="btn" id="btnChooseImages">选择题图</button>
-        <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/svg+xml" multiple hidden>
-      </div>
-
-      <div style="margin-top:24px;">
-        <div style="font-size:12px; font-weight:700; color:var(--text-sub); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:12px;">常规操作</div>
-        <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px;">
-          <button class="btn btn-primary" id="btnExport">⬇ 导出完整备份</button>
-          <button class="btn" id="btnExportErrors">⬇ 导出错题集 JSON</button>
-        </div>
-        <div style="font-size:12px; font-weight:700; color:#DC2626; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:12px;">⚠ 危险操作</div>
-        <div style="display:flex; gap:10px; flex-wrap:wrap;">
-          <button class="btn btn-destructive" id="btnClear">🗑 清空题库</button>
-          <button class="btn btn-destructive" id="btnClearErrors">🗑 清空错题集</button>
-        </div>
+        <div id="importMsg" style="margin-top:12px;"></div>
+      </section>
+      <div class="manage-side-stack">
+        <section class="card manage-card image-upload-row">
+          <div class="manage-card-title"><h3>${icon('link')} 题图关联</h3></div>
+          <p>文件名需与题目 ID 一致，可一次选择多张图片。</p>
+          <button class="btn" id="btnChooseImages">${icon('image')} 选择题图</button>
+          <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/svg+xml" multiple hidden>
+        </section>
+        <section class="card manage-card management-actions">
+          <div class="manage-card-title"><h3>${icon('download')} 备份与下载</h3></div>
+          <button class="btn btn-primary" id="btnExport">${icon('archive')} 导出完整备份</button>
+          <button class="btn" id="btnExportErrors">${icon('download')} 导出错题 JSON</button>
+        </section>
       </div>
     </div>
-
-    <div class="card">
-      <h3 style="font-size:16px; font-weight:700; margin-bottom:16px;">题库总览</h3>
-      ${chaptersHtml}
-    </div>
-
-    <div class="info-alert">
-      <strong>📋 Excel 模板格式说明</strong>
-      <p style="margin-top:10px; color:var(--text-sub); font-size:13.5px; font-weight:500; line-height:1.8;">
-        列顺序：章节 | 题型 | 题目 | 选项A | 选项B | 选项C | 选项D | ... | 正确答案 | 解析<br>
-        程序会自动查找真正的表头行，并识别“单选”“多选”“填空”或“填空题”。<br>
-        填空题无需选项；多个空的答案按出现顺序用中文或英文逗号分隔。可选图片列名：题图、图片、图片路径。
-      </p>
-    </div>
-  `;
+    <section class="danger-zone">
+      <div><h3>${icon('warning')} 危险操作</h3><p>清理后相关数据将从当前浏览器移除，操作前请先导出备份。</p></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-destructive" id="btnClearErrors">清空错题集</button><button class="btn btn-destructive" id="btnClear">${icon('delete')} 清空自定义题库</button></div>
+    </section>
+    <section class="card management-overview-card"><div class="manage-card-title"><h3>${icon('list_alt')} 题库总览</h3><span>单选 ${totalSingle} · 填空 ${totalFill}</span></div>${chaptersHtml}</section>
+    <div class="info-alert"><strong>${icon('description')} Excel 模板格式说明</strong><p>必填列：章节、题型、题目、正确答案。单选题支持选项 A-Z；填空题可使用“答案顺序”列标记各空可交换；图片列可使用题图、图片、图片路径或题图文件。</p></div>`;
 
   // 上传区域点击
   $id('uploadZone').addEventListener('click', () => $id('fileInput').click());
@@ -428,7 +513,7 @@ function renderManage(container) {
   $id('btnChooseImages').addEventListener('click', () => $id('imageInput').click());
   $id('imageInput').addEventListener('change', handleImageImport);
   $id('btnExport').addEventListener('click', () => downloadJSON('quiz-app-backup.json', {
-    version: 14,
+      version: 16,
     exportedAt: new Date().toISOString(),
     questionBank,
     errorBook,
@@ -448,7 +533,7 @@ function renderManage(container) {
     const confirmMsg = hasDefaults
       ? '确定要清空您导入的自定义题库数据吗？内置默认题库将会保留。'
       : '确定要清空题库中所有的题目数据吗？此操作不可恢复。';
-    if (confirm(confirmMsg)) {
+    if (await showConfirmDialog({ title: '清空题库？', message: confirmMsg, confirmText: '清空题库', danger: true })) {
       questionBank = DEFAULT_QUESTIONS.slice();
       errorBook = errorBook.filter(e => DEFAULT_QUESTIONS.some(dq => dq.id === e.questionId));
       bookmarks = bookmarks.filter(id => DEFAULT_QUESTIONS.some(dq => dq.id === id));
@@ -460,7 +545,7 @@ function renderManage(container) {
     }
   });
   $id('btnClearErrors').addEventListener('click', async () => {
-    if (confirm('确定要清空错题集吗？')) {
+    if (await showConfirmDialog({ title: '清空错题集？', message: '所有错题记录和错误次数将被删除，此操作无法撤销。', confirmText: '清空错题集', danger: true })) {
       errorBook = [];
       await persist();
       renderPage();
@@ -510,6 +595,7 @@ function handleImport(e) {
       const typeIdx = headers.findIndex(h => h === '题型');
       const questionIdx = headers.findIndex(h => h === '题目');
       const answerIdx = headers.findIndex(h => h === '正确答案');
+      const answerOrderIdx = headers.findIndex(h => ['答案顺序', '填空顺序'].includes(h));
       const explainIdx = headers.findIndex(h => h === '解析');
       const imageIdx = headers.findIndex(h => ['题图', '图片', '图片路径', '题图文件'].includes(h));
 
@@ -526,7 +612,7 @@ function handleImport(e) {
       }
       const fileName = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
       const fallbackSource = fileName.replace(/[（(].*$/, '').replace(/-第\d+.*$/, '').trim();
-      let newCount = 0, updateCount = 0, skipCount = 0, invalidCount = 0;
+      let newCount = 0, updateCount = 0, skipCount = 0, invalidCount = 0, unsupportedCount = 0, retiredCount = 0;
       const existingKeys = new Map(questionBank.map((q, index) => [q.chapter + '|||' + q.question, index]));
       const existingIds = new Map(questionBank.map((q, index) => [String(q.id), index]));
 
@@ -542,6 +628,10 @@ function handleImport(e) {
           ? String(row[sourceIdx]).trim()
           : fallbackSource;
         const finalChapter = chapter.startsWith(sourceName + ' - ') ? chapter : `${sourceName} - ${chapter}`;
+        if (RETIRED_CHAPTERS.has(chapter) || RETIRED_CHAPTERS.has(finalChapter)) {
+          retiredCount++;
+          continue;
+        }
         const providedId = idIdx >= 0 ? String(row[idIdx] || '').trim() : '';
 
         const key = finalChapter + '|||' + question;
@@ -550,6 +640,10 @@ function handleImport(e) {
           : existingKeys.get(key);
 
         let type = normalizeQuestionType(typeStr);
+        if (type === 'multi') {
+          unsupportedCount++;
+          continue;
+        }
         const options = [];
         const optionMap = {}; // letter -> index
         if (type !== 'fill') {
@@ -590,6 +684,7 @@ function handleImport(e) {
           question,
           options,
           answer: answers,
+          answerOrder: answerOrderIdx >= 0 ? String(row[answerOrderIdx] || '').trim() : 'fixed',
           explanation: explainIdx >= 0 ? String(row[explainIdx] || '').trim() : '',
           topic: topicIdx >= 0 ? String(row[topicIdx] || '').trim() : '',
           page: pageIdx >= 0 ? String(row[pageIdx] || '').trim() : '',
@@ -615,7 +710,9 @@ function handleImport(e) {
 
       await persist();
       renderPage();
-      showImportMsg('success', `导入完成：新增 ${newCount} 题，更新 ${updateCount} 题，跳过重复 ${skipCount} 题，格式无效 ${invalidCount} 题`);
+      const unsupportedText = unsupportedCount ? `，已跳过多选题 ${unsupportedCount} 题` : '';
+      const retiredText = retiredCount ? `，已跳过停用章节 ${retiredCount} 题` : '';
+      showImportMsg('success', `导入完成：新增 ${newCount} 题，更新 ${updateCount} 题，跳过重复 ${skipCount} 题，格式无效 ${invalidCount} 题${unsupportedText}${retiredText}`);
     } catch (err) {
       showImportMsg('error', '解析失败：' + err.message);
     }
@@ -699,23 +796,31 @@ function renderChapterList(container) {
     const subItemsHtml = subItems.map(item => {
       const qs = questionBank.filter(q => q.chapter === item.fullName);
       const single = qs.filter(q => q.type === 'single').length;
-      const multi = qs.filter(q => q.type === 'multi').length;
       const fill = qs.filter(q => q.type === 'fill').length;
       totalQuestions += qs.length;
       return `<div class="chapter-card" data-chapter="${escAttr(item.fullName)}">
-        <div class="chapter-card-num">${subItems.indexOf(item)+1}</div>
-        <span class="chapter-card-name">${esc(item.subName)}</span>
-        <span class="chapter-card-badge">单选 ${single} · 多选 ${multi} · 填空 ${fill}</span>
+        <div class="chapter-card-main">
+          <div class="chapter-card-num">${String(subItems.indexOf(item) + 1).padStart(2, '0')}</div>
+          <div class="chapter-card-copy">
+            <span class="chapter-card-name">${esc(item.subName)}</span>
+            <span class="chapter-card-desc">按题目范围练习本章内容，共 ${qs.length} 道题</span>
+          </div>
+        </div>
+        <span class="chapter-card-badge">
+          <span class="chapter-count"><strong>${single}</strong><span>单选题</span></span>
+          <span class="chapter-count"><strong>${fill}</strong><span>填空题</span></span>
+        </span>
+        <button type="button" class="btn btn-primary chapter-start">开始练习 ${icon('arrow_forward')}</button>
       </div>`;
     }).join('');
 
     // 默认展示全部展开状态（添加 .expanded 类）
     return `<div class="chapter-group expanded" data-group-index="${idx}">
       <div class="chapter-group-header">
-        <span class="group-title">📁 ${esc(parent)}</span>
+        <span class="group-title">${icon('menu_book')} ${esc(parent)}</span>
         <div style="display:flex; align-items:center; gap:8px;">
           <span class="chapter-badge" style="font-weight:600; background:var(--primary-light); color:var(--primary); padding:3px 8px; border-radius:12px; font-size:12px;">共 ${totalQuestions} 题</span>
-          <span class="group-arrow">▼</span>
+          <span class="group-arrow material-symbols-outlined">expand_less</span>
         </div>
       </div>
       <div class="chapter-group-content">
@@ -731,6 +836,26 @@ function renderChapterList(container) {
         <p>选择章节和题目范围，选择题与填空题会在同一轮练习中统一判分。</p>
       </div>
       <span class="page-heading-count">${questionBank.length} 题</span>
+    </div>
+    <div class="overview-grid" aria-label="学习概览">
+      <section class="overview-card">
+        ${icon('database')}
+        <div class="overview-label">题库总量</div>
+        <div class="overview-value">${questionBank.length.toLocaleString()}</div>
+        <div class="overview-note">${icon('check_circle')} 已载入本地题库</div>
+      </section>
+      <section class="overview-card">
+        ${icon('error')}
+        <div class="overview-label">待复习错题</div>
+        <div class="overview-value">${countValidErrors()}</div>
+        <div class="overview-progress"><span style="width:${questionBank.length ? Math.min(100, countValidErrors() / questionBank.length * 100) : 0}%"></span></div>
+      </section>
+      <section class="overview-card">
+        ${icon('menu_book')}
+        <div class="overview-label">已覆盖章节</div>
+        <div class="overview-value">${chapters.length}</div>
+        <div class="overview-note muted">${bookmarks.length} 道重点收藏</div>
+      </section>
     </div>
     <div class="chapter-list" id="chapterList">
       ${groupsHtml}
@@ -781,35 +906,27 @@ function showPracticeConfigModal(questions, chapter) {
   }
 
   overlay.innerHTML = `
-    <div class="modal" style="max-width: 440px; width: 90%;">
-      <div class="modal-title" style="margin-bottom: 8px;">🎯 刷题配置</div>
-      <p style="color: var(--text-sub); font-size: 14px; margin-bottom: 20px; font-weight: 500;">
-        章节：${esc(chapter)}
-      </p>
-
-      <div style="margin-bottom: 20px;">
-        <label style="font-weight: 600; font-size: 14px; display: block; margin-bottom: 12px; color: var(--text-main);">选择刷题范围：</label>
-
-        <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
-          <span style="color: var(--text-sub); font-size: 14px; font-weight: 500;">从第</span>
-          <input type="number" class="input" id="practiceStartInput" value="1" min="1" max="${total}" style="width: 80px; font-weight: 600; text-align: center;">
-          <span style="color: var(--text-sub); font-size: 14px; font-weight: 500;">题，到第</span>
-          <input type="number" class="input" id="practiceEndInput" value="${total}" min="1" max="${total}" style="width: 80px; font-weight: 600; text-align: center;">
-          <span style="color: var(--text-sub); font-size: 14px; font-weight: 500;">题</span>
-        </div>
-
-        <div style="color: var(--text-sub); font-size: 13px; margin-bottom: 16px; font-weight: 600;">
-          本次共选择：<span id="rangeCountText" style="color: var(--primary); font-size: 16px; font-weight: 700;">${total}</span> 道题（章节总共 ${total} 题）
-        </div>
-
-        <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-top: 10px;">
-          ${quickButtonsHtml}
-        </div>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="practiceConfigTitle">
+      <div class="modal-head">
+        <div><div class="modal-title" id="practiceConfigTitle">练习配置</div><p class="modal-subtitle">${esc(chapter)}</p></div>
+        <button type="button" class="icon-button modal-close" id="btnPracticeClose" aria-label="关闭">${icon('close')}</button>
       </div>
-
-      <div class="modal-footer" style="margin-top: 24px;">
+      <div class="modal-body">
+        <div class="modal-info">${icon('info')}<div><strong>本章共计 ${total} 题</strong><br>设置本次练习的连续题号范围。</div></div>
+        <label class="range-label" for="practiceStartInput">选择题目范围</label>
+        <div class="range-fields">
+          <div class="range-input-wrap"><input type="number" class="input" id="practiceStartInput" value="1" min="1" max="${total}"><span>起始</span></div>
+          <span>—</span>
+          <div class="range-input-wrap"><input type="number" class="input" id="practiceEndInput" value="${total}" min="1" max="${total}"><span>结束</span></div>
+        </div>
+        <div class="range-summary">本次将练习 <strong id="rangeCountText">${total}</strong> 道题</div>
+        <span class="range-label">快捷范围</span>
+        <div class="quick-range-list">${quickButtonsHtml}</div>
+        <div class="range-error" id="rangeError" role="alert"></div>
+      </div>
+      <div class="modal-footer">
         <button class="btn" id="btnPracticeCancel">取消</button>
-        <button class="btn btn-primary" id="btnPracticeStart">开始刷题</button>
+        <button class="btn btn-primary" id="btnPracticeStart">${icon('play_arrow')} 开始练习</button>
       </div>
     </div>
   `;
@@ -819,22 +936,30 @@ function showPracticeConfigModal(questions, chapter) {
   const startInput = overlay.querySelector('#practiceStartInput');
   const endInput = overlay.querySelector('#practiceEndInput');
   const countText = overlay.querySelector('#rangeCountText');
+  const rangeError = overlay.querySelector('#rangeError');
+  const startButton = overlay.querySelector('#btnPracticeStart');
 
   function updateRangeCount() {
     const start = parseInt(startInput.value);
     const end = parseInt(endInput.value);
     if (!isNaN(start) && !isNaN(end) && start >= 1 && end >= start && end <= total) {
       countText.textContent = end - start + 1;
+      rangeError.textContent = '';
+      startButton.disabled = false;
     } else {
       countText.textContent = '--';
+      rangeError.textContent = `请输入 1 至 ${total} 之间的有效范围，且结束题号不能小于起始题号。`;
+      startButton.disabled = true;
     }
   }
 
   startInput.addEventListener('input', updateRangeCount);
   endInput.addEventListener('input', updateRangeCount);
 
-  overlay.querySelector('#btnPracticeCancel').addEventListener('click', () => { overlay.remove(); });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  const closeModal = () => overlay.remove();
+  overlay.querySelector('#btnPracticeCancel').addEventListener('click', closeModal);
+  overlay.querySelector('#btnPracticeClose').addEventListener('click', closeModal);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
 
   // 快捷选择事件绑定
   overlay.querySelectorAll('.btn-range-quick').forEach(btn => {
@@ -848,10 +973,7 @@ function showPracticeConfigModal(questions, chapter) {
   overlay.querySelector('#btnPracticeStart').addEventListener('click', () => {
     const start = parseInt(startInput.value);
     const end = parseInt(endInput.value);
-    if (isNaN(start) || isNaN(end) || start < 1 || end < start || end > total) {
-      alert(`请输入有效的刷题范围！范围必须在 1 到 ${total} 之间，且结束题数不能小于起始题数。`);
-      return;
-    }
+    if (startButton.disabled || isNaN(start) || isNaN(end)) return;
     overlay.remove();
     // 按顺序从题库中把这部分题切出来（1-indexed 转为 0-indexed slice）
     const selectedQuestions = questions.slice(start - 1, end);
@@ -902,6 +1024,8 @@ function renderQuizCard() {
   const q = quizState.questions[idx];
   const isMulti = q.type === 'multi';
   const isFill = q.type === 'fill';
+  const fillBlankCount = isFill ? countFillBlanks(q) : 0;
+  const isFlexibleFillOrder = isFill && fillBlankCount > 1 && q.answerOrder === 'any';
   const typeMeta = questionTypeMeta(q.type);
   const gridClass = q.displayOptions.length > 4 ? 'single-col' : '';
   const selected = quizState.answers[idx] || [];
@@ -910,7 +1034,7 @@ function renderQuizCard() {
   const isFlagged = quizState.flagged.includes(q.id);
 
   // 题目导航按钮
-  let navHtml = `<div class="quiz-nav-sidebar ${quizState.navCollapsed ? 'collapsed' : ''}" id="quizNavSidebar">`;
+  let navGridHtml = `<div class="quiz-nav-sidebar ${quizState.navCollapsed ? 'collapsed' : ''}" id="quizNavSidebar">`;
   for (let i = 0; i < total; i++) {
     const qId = quizState.questions[i].id;
     const isQFlagged = quizState.flagged.includes(qId);
@@ -919,67 +1043,64 @@ function renderQuizCard() {
       hasUserAnswer(quizState.answers[i]) ? 'answered' : '',
       isQFlagged ? 'flagged' : ''
     ].filter(Boolean).join(' ');
-    navHtml += `<span class="quiz-nav-dot ${cls}" data-idx="${i}">${i + 1}</span>`;
+    navGridHtml += `<button type="button" class="quiz-nav-dot ${cls}" data-idx="${i}" aria-label="第 ${i + 1} 题">${i + 1}</button>`;
   }
-  navHtml += '</div>';
-
-  $id('container').innerHTML = `
-    <div class="card">
-      <div class="quiz-header">
-        <span class="tag ${typeMeta.tagClass}">${typeMeta.label}</span>
-        <div style="display:flex; align-items:center; gap:12px;">
-          <span class="quiz-progress">第 ${idx + 1} 题 / 共 ${total} 题 · 已答 ${answeredCount} 题</span>
-          <button class="btn btn-sm" id="btnToggleFlag" style="padding: 4px 10px; font-size: 12px; font-weight: 600; border-color: ${isFlagged ? 'var(--warning)' : 'var(--border-color)'}; color: ${isFlagged ? 'var(--warning)' : 'var(--text-sub)'}; background: ${isFlagged ? 'var(--warning-bg)' : 'transparent'};">
-            ${isFlagged ? '🚩 已标记' : '🏳️ 标记此题'}
-          </button>
-          <button class="btn btn-sm quiz-bookmark-btn ${bookmarks.includes(q.id) ? 'bookmarked' : ''}" id="btnToggleBookmark">
-            ${bookmarks.includes(q.id) ? '⭐' : '☆'}
-          </button>
-          <button class="btn btn-sm" id="btnToggleNav" style="padding: 4px 10px; font-size: 12px; font-weight: 600; border-color: var(--primary); color: var(--primary);">${quizState.navCollapsed ? '展开题号' : '收起题号'}</button>
-        </div>
+  navGridHtml += '</div>';
+  const navHtml = `
+    <aside class="quiz-nav-panel">
+      <h3>题目概览 <button type="button" class="text-button" id="btnToggleNav">${quizState.navCollapsed ? '展开' : '收起'}</button></h3>
+      ${navGridHtml}
+      <div class="quiz-legend">
+        <span class="answered"><i></i>已作答</span><span class="current"><i></i>当前题</span>
+        <span class="flagged"><i></i>已标记</span><span><i></i>未作答</span>
       </div>
+    </aside>`;
 
-      ${navHtml}
-
-      <div class="question-row">
-        <div class="question-num ${(idx + 1) >= 100 ? 'num-lg' : ''}">${idx + 1}</div>
-        <div class="question-text">${esc(q.question)}</div>
+  document.body.classList.remove('result-active');
+  document.body.classList.add('quiz-active');
+  const container = $id('container');
+  container.className = 'container app-container quiz-container';
+  container.innerHTML = `
+    <div class="quiz-page">
+      <div class="quiz-workbar">
+        <button type="button" class="quiz-exit" id="btnExitQuiz">${icon('arrow_back')} 退出</button>
+        <span class="quiz-session-title">${esc(quizState.chapter)}</span>
+        <div class="quiz-session-progress"><span>进度：${idx + 1}/${total}</span><div class="quiz-progress-track"><span style="width:${(idx + 1) / total * 100}%"></span></div></div>
       </div>
-
-      ${renderQuestionImage(q)}
-
-      ${isFill ? `
-        <div class="fill-answer-panel" id="fillAnswerPanel">
-          <div class="fill-answer-label">填写答案</div>
-          ${Array.from({ length: countFillBlanks(q) }, (_, inputIndex) => `
-            <label class="fill-answer-field">
-              ${countFillBlanks(q) > 1 ? `<span>第 ${inputIndex + 1} 空</span>` : ''}
-              <input class="input fill-answer-input" data-fill-index="${inputIndex}" value="${escAttr(selected[inputIndex] || '')}" autocomplete="off" placeholder="输入答案">
-            </label>
-          `).join('')}
-          <p>自动判分会忽略空格、常见标点和大小写；多个空请按题目顺序填写。</p>
-        </div>
-      ` : `
-        <div class="options-grid ${gridClass}" id="optionsGrid">
-          ${q.displayOptions.map(opt => `
-            <button type="button" class="option-btn ${selected.includes(opt.letter) ? 'selected' : ''}" data-letter="${opt.letter}">
-              <span class="option-letter">${opt.letter}</span>
-              <span>${esc(opt.text)}</span>
-            </button>
-          `).join('')}
-        </div>
-      `}
-
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px">
-        <button class="btn" id="btnPrev" ${idx === 0 ? 'disabled' : ''}>上一题</button>
-        <span style="color:var(--text-sub); font-size:13px; font-weight:500;">${isFill ? '填写完成后可继续下一题' : (isMulti ? '点击选项可切换选中/取消' : '点击选项选中答案')}</span>
-        ${idx < total - 1
-          ? '<button class="btn btn-primary" id="btnNext">下一题</button>'
-          : '<button class="btn btn-primary" id="btnSubmit">交卷</button>'
-        }
+      <div class="quiz-layout quiz-layout-${q.type}">
+        ${navHtml}
+        <main class="quiz-main">
+          <div class="card quiz-card">
+            <div class="quiz-header">
+              <div><span class="tag ${typeMeta.tagClass}">${typeMeta.label}</span> <span class="quiz-progress">第 ${idx + 1} 题 / 共 ${total} 题 · 已答 ${answeredCount} 题</span></div>
+              <div class="quiz-actions">
+                <button type="button" class="quiz-icon-action ${isFlagged ? 'active' : ''}" id="btnToggleFlag" title="${isFlagged ? '取消标记' : '标记此题'}" aria-label="${isFlagged ? '取消标记' : '标记此题'}">${icon('flag')}</button>
+                <button type="button" class="quiz-icon-action quiz-bookmark-btn ${bookmarks.includes(q.id) ? 'bookmarked' : ''}" id="btnToggleBookmark" title="${bookmarks.includes(q.id) ? '取消收藏' : '收藏此题'}" aria-label="${bookmarks.includes(q.id) ? '取消收藏' : '收藏此题'}">${icon(bookmarks.includes(q.id) ? 'star' : 'star_outline')}</button>
+              </div>
+            </div>
+            <div class="question-row"><div class="question-text">${esc(q.question)}</div></div>
+            ${renderQuestionImage(q)}
+            ${isFill ? `
+              <div class="fill-answer-panel" id="fillAnswerPanel">
+                <div class="fill-answer-heading"><div class="fill-answer-label">填写答案</div>${isFlexibleFillOrder ? '<span class="fill-order-badge">各空顺序可交换</span>' : ''}</div>
+                ${Array.from({ length: fillBlankCount }, (_, inputIndex) => `
+                  <label class="fill-answer-field"><span>${fillBlankCount > 1 ? `第 ${inputIndex + 1} 空` : '答案'}</span><input class="input fill-answer-input" data-fill-index="${inputIndex}" value="${escAttr(selected[inputIndex] || '')}" autocomplete="off" placeholder="输入答案..."></label>
+                `).join('')}
+                <p class="fill-answer-help">${isFlexibleFillOrder ? '本题各空答案可交换顺序；自动判分会忽略空格、常见标点和大小写。' : '自动判分会忽略空格、常见标点和大小写；多个空请按题目顺序填写。'}</p>
+              </div>` : `
+              <div class="options-grid ${gridClass}" id="optionsGrid">
+                ${q.displayOptions.map(opt => `<button type="button" class="option-btn ${selected.includes(opt.letter) ? 'selected' : ''}" data-letter="${opt.letter}"><span class="option-letter">${opt.letter}</span><span><strong>${opt.letter}.</strong>&nbsp; ${esc(opt.text)}</span></button>`).join('')}
+              </div>`}
+          </div>
+          ${isFill ? `<div class="grading-note">${icon('info')}<div><strong>评分规则</strong><br>${isFlexibleFillOrder ? '各空答案允许互换。' : '请按空位顺序作答。'}系统会忽略空格、常见标点和大小写。</div></div>` : ''}
+          <div class="quiz-footer">
+            <button class="btn" id="btnPrev" ${idx === 0 ? 'disabled' : ''}>${icon('arrow_back')} 上一题</button>
+            <span class="quiz-footer-hint">${isFill ? '填写完成后可继续下一题' : (isMulti ? '可选择多个答案，再进入下一题' : '选择答案后将自动进入下一题')}</span>
+            ${idx < total - 1 ? `<button class="btn btn-primary" id="btnNext">下一题 ${icon('arrow_forward')}</button>` : `<button class="btn btn-primary" id="btnSubmit">${icon('check')} 交卷</button>`}
+          </div>
+        </main>
       </div>
-    </div>
-  `;
+    </div>`;
 
   if (isFill) {
     document.querySelectorAll('.fill-answer-input').forEach(input => {
@@ -1025,8 +1146,19 @@ function renderQuizCard() {
     if (nav && btn) {
       const isCollapsed = nav.classList.toggle('collapsed');
       quizState.navCollapsed = isCollapsed;
-      btn.textContent = isCollapsed ? '展开题号' : '收起题号';
+      btn.textContent = isCollapsed ? '展开' : '收起';
     }
+  });
+
+  $id('btnExitQuiz').addEventListener('click', async () => {
+    const answered = quizState.answers.filter(hasUserAnswer).length;
+    const shouldExit = answered === 0 || await showConfirmDialog({
+      title: '退出本次练习？',
+      message: `当前已作答 ${answered} 题，退出后本轮答案不会保留。`,
+      confirmText: '退出练习',
+      danger: true
+    });
+    if (shouldExit) navigateTo('practice');
   });
 
   $id('btnToggleFlag').addEventListener('click', () => {
@@ -1053,11 +1185,13 @@ function renderQuizCard() {
   if (idx < total - 1) {
     $id('btnNext').addEventListener('click', () => { quizState.currentIndex++; renderQuizCard(); });
   } else {
-    $id('btnSubmit').addEventListener('click', () => {
+    $id('btnSubmit').addEventListener('click', async () => {
       const unanswered = quizState.answers.filter(answer => !hasUserAnswer(answer)).length;
-      let msg = '确定要交卷吗？';
-      if (unanswered > 0) msg += `\n还有 ${unanswered} 题未作答，交卷后未答题将计为错误。`;
-      if (confirm(msg)) submitQuiz();
+      const flagged = quizState.flagged.length;
+      let msg = `本次共 ${total} 题，已作答 ${total - unanswered} 题。`;
+      if (unanswered > 0) msg += `\n还有 ${unanswered} 题未作答，交卷后将计为错误。`;
+      if (flagged > 0) msg += `\n另有 ${flagged} 题被标记。`;
+      if (await showConfirmDialog({ title: '确认交卷？', message: msg, confirmText: '确认交卷' })) submitQuiz();
     });
   }
 }
@@ -1072,7 +1206,7 @@ function submitQuiz() {
       ? submittedAnswer.map(value => String(value || '').trim())
       : userDisplayLetters.map(letter => q.letterMap ? q.letterMap[letter] : letter);
     const isCorrect = q.type === 'fill'
-      ? isFillAnswerCorrect(userAnswer, q.answer)
+      ? isFillAnswerCorrect(userAnswer, q.answer, q.answerOrder)
       : JSON.stringify([...userAnswer].sort()) === JSON.stringify([...q.answer].sort());
     if (isCorrect) { correct++; } else { wrong++; addToErrorBook(q.id); }
     return { ...q, userAnswer, isCorrect, userDisplayLetters };
@@ -1093,7 +1227,8 @@ function showQuizResult(results) {
 
   let perQuestionScore = 0;
   let earnedScore = 0;
-  let scoreHtml = '';
+  let displayEarned = 0;
+  let displayPerQuestion = 0;
 
   const isExam = quizState.chapter === '模拟考试';
 
@@ -1105,20 +1240,8 @@ function showQuizResult(results) {
       }
     });
 
-    const displayEarned = Math.round(earnedScore * 10) / 10;
-    const displayPerQuestion = Math.round(perQuestionScore * 100) / 100;
-
-    scoreHtml = `
-      <div class="card" style="text-align:center; background:var(--primary-light); border-color:var(--primary); margin-bottom:20px;">
-        <h3 style="font-size:16px; font-weight:600; color:var(--primary); margin-bottom:8px;">模拟考试得分</h3>
-        <div style="font-size:54px; font-weight:800; color:var(--primary); font-family:'Outfit', sans-serif;">
-          ${displayEarned} <span style="font-size:18px; font-weight:500; color:var(--text-sub);">/ 100 分</span>
-        </div>
-        <p style="font-size:12px; color:var(--text-sub); margin-top:8px; font-weight:500;">
-          单选、多选和填空均按题计分：每题 ${displayPerQuestion} 分
-        </p>
-      </div>
-    `;
+    displayEarned = Math.round(earnedScore * 10) / 10;
+    displayPerQuestion = Math.round(perQuestionScore * 100) / 100;
   }
 
   const wrongResults = results.filter(r => !r.isCorrect);
@@ -1140,7 +1263,7 @@ function showQuizResult(results) {
         ? (r.userAnswer.filter(Boolean).join(' / ') || '未作答')
         : ((r.userDisplayLetters && r.userDisplayLetters.length > 0)
           ? [...r.userDisplayLetters].sort().join(', ') : '未作答');
-      const statusIcon = '❌';
+      const statusIcon = icon('cancel');
       const statusColor = 'var(--wrong)';
       const itemClass = 'wrong-item';
 
@@ -1169,13 +1292,15 @@ function showQuizResult(results) {
               <span style="color:var(--text-main); font-weight:500;">${esc(r.question)}</span>${flagBadge}${scoreHint}
             </span>
             <span style="flex-shrink:0; font-size:13px; font-weight:600; color:${statusColor};">✗ ${userDisplay}</span>
-            <span class="result-arrow" style="flex-shrink:0; font-size:12px; color:var(--text-sub); transition:transform 0.2s;">▶</span>
+            <span class="result-arrow material-symbols-outlined">expand_more</span>
           </div>
           <div class="result-detail" style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border-color); font-size:13px; color:var(--text-sub);">
             ${renderQuestionImage(r, 'result-question-image')}
             ${optionsDetail ? `<div style="margin-bottom:8px;"><strong>选项：</strong>${optionsDetail}</div>` : ''}
-            <div style="margin-bottom:6px; color:var(--text-main);">你的答案：<strong style="color:${statusColor}">${userDisplay}</strong></div>
-            <div style="margin-bottom:6px; color:var(--text-main);">${r.type === 'fill' ? '参考答案' : '正确答案'}：<strong style="color:var(--correct)">${esc(correctDisplay)}</strong></div>
+            <div class="answer-comparison">
+              <div class="answer-panel user"><label>你的答案</label><strong>${userDisplay}</strong></div>
+              <div class="answer-panel correct"><label>${r.type === 'fill' ? '参考答案' : '正确答案'}</label><strong>${esc(correctDisplay)}</strong></div>
+            </div>
             ${r.explanation ? `<div class="explanation" style="margin-top:8px"><strong>解析：</strong>${esc(r.explanation)}</div>` : ''}
           </div>
         </div>
@@ -1183,41 +1308,28 @@ function showQuizResult(results) {
     }).join('');
   }
 
-  $id('container').innerHTML = `
-    ${scoreHtml}
-    <div class="card" style="text-align:center">
-      <div style="font-size:48px; margin-bottom:16px">${pct >= 60 ? '🎉' : '💪'}</div>
-      <h2 style="font-size:22px; font-weight:700;">${quizState.chapter} · 答题结果</h2>
-      <div class="stats-row" style="justify-content:center; margin:24px 0">
-        <div class="stat-item">
-          <div class="stat-num">${total}</div>
-          <div class="stat-label">总题数</div>
-        </div>
-        <div class="stat-item">
-          <div class="stat-num" style="color:var(--correct)">${correct}</div>
-          <div class="stat-label">正确</div>
-        </div>
-        <div class="stat-item">
-          <div class="stat-num" style="color:var(--wrong)">${wrong}</div>
-          <div class="stat-label">错误</div>
-        </div>
-        <div class="stat-item">
-          <div class="stat-num">${pct}%</div>
-          <div class="stat-label">正确率</div>
-        </div>
+  document.body.classList.remove('quiz-active');
+  document.body.classList.add('result-active');
+  const container = $id('container');
+  container.className = 'container app-container result-container';
+  const attempted = results.filter(r => hasUserAnswer(r.userAnswer)).length;
+  container.innerHTML = `
+    <section class="result-hero">
+      <h1>答题结果</h1>
+      <p>${esc(quizState.chapter)} · ${isExam ? `每题 ${displayPerQuestion} 分` : '本轮练习已完成'}</p>
+      <div class="result-metrics">
+        <div class="result-metric"><span>正确率</span><strong>${pct}<small>%</small></strong><div class="result-meter"><i style="width:${pct}%"></i></div></div>
+        <div class="result-metric"><span>${isExam ? '考试得分' : '正确题数'}</span><strong>${isExam ? displayEarned : correct}<small> / ${isExam ? 100 : total}</small></strong></div>
+        <div class="result-metric"><span>已作答题目</span><strong>${attempted}<small> / ${total}</small></strong></div>
       </div>
-    </div>
-
-    <div class="card">
-      <h3 style="font-size:18px; font-weight:700; margin-bottom:16px">答题详情</h3>
-      ${detailHtml}
-    </div>
-
-    <div style="text-align:center; margin-top:20px;">
-      <button class="btn btn-primary" id="btnBack">返回章节列表</button>
-    </div>
-  `;
-  $id('btnBack').addEventListener('click', () => { currentPage = 'practice'; renderPage(); });
+      <div class="result-actions"><button class="btn" id="btnBack">返回列表</button><button class="btn btn-primary" id="btnRetry">再次练习</button></div>
+    </section>
+    <section>
+      <h2 class="result-section-title">${icon(wrong ? 'error' : 'check_circle')} ${wrong ? `错题回顾（${wrong}）` : '本轮全部答对'}</h2>
+      <div class="result-list">${detailHtml}</div>
+    </section>`;
+  $id('btnBack').addEventListener('click', () => navigateTo('practice'));
+  $id('btnRetry').addEventListener('click', () => startQuiz(quizState.questions, quizState.chapter));
 }
 
 function renderReferenceOptions(question) {
@@ -1251,7 +1363,7 @@ function renderErrorBook(container) {
     container.innerHTML = `
       <div class="card">
       <div class="empty-state">
-        <div class="empty-state-icon">📝</div>
+        <div class="empty-state-icon">${icon('assignment_late')}</div>
         <div class="empty-state-title">错题集为空</div>
         <div class="empty-state-desc">继续加油！答错的题目会自动收录到这里，方便你集中复习。</div>
         <button class="btn btn-primary" onclick="currentPage='practice'; renderPage();" style="min-width:160px; padding:12px 24px;">去章节练习</button>
@@ -1267,22 +1379,13 @@ function renderErrorBook(container) {
     })
   )];
 
-  const filterHtml = `
-    <select class="select" id="errorFilter">
-      <option value="all">全部章节</option>
-      ${chapters.map(ch => `<option value="${escAttr(ch)}">${esc(ch)}</option>`).join('')}
-    </select>
-    <button class="btn btn-primary btn-sm" id="btnRetryAll" style="margin-left:12px">重新练习全部</button>
-  `;
+  const filterHtml = `<div class="filter-pills" id="errorFilters"><button type="button" class="filter-pill active" data-filter="all">全部章节</button>${chapters.map(ch => `<button type="button" class="filter-pill" data-filter="${escAttr(ch)}">${esc(ch)}</button>`).join('')}</div>`;
 
   container.innerHTML = `
-    <div class="card">
-      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:16px">
-        <h2 style="font-size:20px; font-weight:700;">错题集 · ${errorBook.length} 题</h2>
-        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">${filterHtml}</div>
-      </div>
-      <div id="errorList"></div>
-    </div>
+    <div class="page-heading"><div><h1>错题集</h1><p>回顾薄弱知识点，按章节集中复习并重新练习。</p></div><button class="btn btn-primary" id="btnRetryAll">${icon('play_circle')} 开始复习</button></div>
+    ${filterHtml}
+    <div class="review-summary-bar"><span>${icon('list_alt')} 共 ${errorBook.length} 道错题</span><span style="color:var(--warning)">${icon('trending_up')} 优先复习错误次数较多的题目</span></div>
+    <div id="errorList"></div>
   `;
 
   function renderList(filter = 'all') {
@@ -1305,20 +1408,13 @@ function renderErrorBook(container) {
       const meta = questionTypeMeta(q.type);
       const answerStr = formatQuestionAnswer(q);
 
-      return `<div class="error-item collapsed" style="display:flex; flex-direction:column; gap:8px;">
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
-          <span style="font-weight:600; line-height:1.5;"><span class="tag ${meta.tagClass}" style="margin-right:6px;">${meta.shortLabel}</span>${esc(q.question)}</span>
-          <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
-            <span class="tag tag-multi">错误 ${e.wrongCount} 次</span>
-            <span class="result-arrow" style="font-size:12px; color:var(--text-sub); transition:transform 0.2s;">▶</span>
-          </div>
-        </div>
-        <div style="font-size:13px; color:var(--text-sub); font-weight:500;">
-          ${q.type === 'fill' ? '参考答案' : '正确答案'}：<strong style="color:var(--correct)">${esc(answerStr)}</strong> · 章节：${esc(q.chapter)}
-          <button class="btn btn-sm btn-danger" style="margin-left:8px; padding:3px 8px; font-size:11px;" data-id="${q.id}" data-action="remove">移除</button>
-        </div>
+      return `<div class="error-item collapsed">
+        <div class="review-item-meta"><span class="tag ${meta.tagClass}">${esc(q.chapter)}</span><span class="tag tag-multi">错误 ${e.wrongCount} 次</span><span>${icon('schedule')} 最近答错 ${esc(e.lastWrong || '未知')}</span></div>
+        <div class="review-item-heading"><span>${esc(q.question)}</span><span class="result-arrow material-symbols-outlined">expand_more</span></div>
         <div class="error-detail" style="margin-top:8px; padding-top:12px; border-top:1px solid var(--border-color); font-size:13px; color:var(--text-sub);">
+          <div style="margin-bottom:10px">${q.type === 'fill' ? '参考答案' : '正确答案'}：<strong style="color:var(--correct)">${esc(answerStr)}</strong></div>
           ${renderReferenceDetail(q)}
+          <button class="btn btn-sm btn-destructive" data-id="${q.id}" data-action="remove">移出错题集</button>
         </div>
       </div>`;
     }).join('');
@@ -1328,17 +1424,23 @@ function renderErrorBook(container) {
       btn.addEventListener('click', async function() {
         errorBook = errorBook.filter(e => e.questionId !== this.dataset.id);
         await persist();
-        renderList($id('errorFilter').value);
+        renderList(document.querySelector('#errorFilters .active')?.dataset.filter || 'all');
       });
     });
   }
 
   renderList();
-  $id('errorFilter').addEventListener('change', function() { renderList(this.value); });
+  $id('errorFilters').addEventListener('click', function(event) {
+    const pill = event.target.closest('.filter-pill');
+    if (!pill) return;
+    this.querySelectorAll('.filter-pill').forEach(item => item.classList.remove('active'));
+    pill.classList.add('active');
+    renderList(pill.dataset.filter);
+  });
   $id('btnRetryAll').addEventListener('click', () => {
     const ids = errorBook.map(e => e.questionId);
     const questions = ids.map(id => questionBank.find(q => q.id === id)).filter(Boolean);
-    if (questions.length === 0) { alert('没有可练习的错题'); return; }
+    if (questions.length === 0) { $id('errorList').innerHTML = '<div class="empty-state"><div class="empty-state-title">没有可练习的错题</div></div>'; return; }
     startQuiz(questions, '错题重练');
   });
 }
@@ -1351,7 +1453,7 @@ function renderBookmarks(container) {
   if (bookmarks.length === 0) {
     container.innerHTML = `
       <div class="card"><div class="empty-state">
-        <div class="empty-state-icon">☆</div>
+        <div class="empty-state-icon">${icon('star_outline')}</div>
         <div class="empty-state-title">收藏集为空</div>
         <div class="empty-state-desc">在答题页点击星标，即可将题目收藏到这里。</div>
         <button class="btn btn-primary" onclick="currentPage='practice'; renderPage();">去章节练习</button>
@@ -1360,19 +1462,10 @@ function renderBookmarks(container) {
   }
   const chapters = [...new Set(bookmarks.map(id => questionBank.find(q => q.id === id)?.chapter).filter(Boolean))];
   container.innerHTML = `
-    <div class="card">
-      <div class="section-toolbar">
-        <h2 id="bmHeading">收藏集 · ${bookmarks.length} 题</h2>
-        <div class="toolbar-actions">
-          <select class="select" id="bookmarkFilter">
-            <option value="all">全部章节</option>
-            ${chapters.map(ch => `<option value="${escAttr(ch)}">${esc(ch)}</option>`).join('')}
-          </select>
-          <button class="btn btn-primary btn-sm" id="btnRetryBookmarks">重新练习全部</button>
-        </div>
-      </div>
-      <div id="bookmarkList"></div>
-    </div>`;
+    <div class="page-heading"><div><h1 id="bmHeading">收藏集</h1><p>集中查看和练习主动收藏的重点题目。</p></div><button class="btn btn-primary" id="btnRetryBookmarks">${icon('play_circle')} 练习全部收藏</button></div>
+    <div class="filter-pills" id="bookmarkFilters"><button type="button" class="filter-pill active" data-filter="all">全部章节</button>${chapters.map(ch => `<button type="button" class="filter-pill" data-filter="${escAttr(ch)}">${esc(ch)}</button>`).join('')}</div>
+    <div class="review-summary-bar"><span>${icon('star')} 共 ${bookmarks.length} 道收藏</span><span>收藏状态会同步到答题页和搜索页</span></div>
+    <div id="bookmarkList"></div>`;
 
   function renderBmList(filter) {
     const list = $id('bookmarkList');
@@ -1388,16 +1481,10 @@ function renderBookmarks(container) {
       if (!q) return '';
       const meta = questionTypeMeta(q.type);
       return `
-        <div class="error-item collapsed">
-          <div class="review-item-heading">
-            <span><span class="tag ${meta.tagClass}">${meta.shortLabel}</span>${esc(q.question)}</span>
-            <span class="result-arrow">▶</span>
-          </div>
-          <div class="review-item-meta">
-            ${q.type === 'fill' ? '参考答案' : '正确答案'}：<strong>${esc(formatQuestionAnswer(q))}</strong> · 章节：${esc(q.chapter)}
-            <button class="btn btn-sm btn-destructive" data-id="${escAttr(q.id)}" data-action="remove-bm">移除</button>
-          </div>
-          <div class="error-detail">${renderReferenceDetail(q)}</div>
+        <div class="error-item bookmark-item collapsed">
+          <div class="review-item-meta"><span class="tag ${meta.tagClass}">${meta.shortLabel}</span><span>${esc(q.chapter)}</span></div>
+          <div class="review-item-heading"><span>${esc(q.question)}</span><span class="result-arrow material-symbols-outlined">expand_more</span></div>
+          <div class="error-detail"><div style="margin-bottom:10px">${q.type === 'fill' ? '参考答案' : '正确答案'}：<strong style="color:var(--correct)">${esc(formatQuestionAnswer(q))}</strong></div>${renderReferenceDetail(q)}<button class="btn btn-sm btn-destructive" data-id="${escAttr(q.id)}" data-action="remove-bm">取消收藏</button></div>
         </div>`;
     }).join('');
     list.querySelectorAll('[data-action="remove-bm"]').forEach(btn => {
@@ -1406,18 +1493,22 @@ function renderBookmarks(container) {
         const i = bookmarks.indexOf(this.dataset.id);
         if (i >= 0) bookmarks.splice(i, 1);
         await persist();
-        const h2 = $id('bmHeading');
-        if (h2) h2.textContent = '⭐ 收藏集 · ' + bookmarks.length + ' 题';
-        renderBmList($id('bookmarkFilter') ? $id('bookmarkFilter').value : 'all');
+        renderBmList(document.querySelector('#bookmarkFilters .active')?.dataset.filter || 'all');
       });
     });
   }
 
   renderBmList('all');
-  $id('bookmarkFilter').addEventListener('change', function() { renderBmList(this.value); });
+  $id('bookmarkFilters').addEventListener('click', function(event) {
+    const pill = event.target.closest('.filter-pill');
+    if (!pill) return;
+    this.querySelectorAll('.filter-pill').forEach(item => item.classList.remove('active'));
+    pill.classList.add('active');
+    renderBmList(pill.dataset.filter);
+  });
   $id('btnRetryBookmarks').addEventListener('click', () => {
     const qs = bookmarks.map(id => questionBank.find(q => q.id === id)).filter(Boolean);
-    if (!qs.length) { alert('没有可练习的收藏题'); return; }
+    if (!qs.length) { $id('bookmarkList').innerHTML = '<div class="empty-state"><div class="empty-state-title">没有可练习的收藏题</div></div>'; return; }
     startQuiz(qs, '收藏集练习');
   });
 }
@@ -1426,7 +1517,7 @@ function renderBookmarks(container) {
    题目搜索
    ================================================================ */
 function renderSearch(container) {
-  container.innerHTML = '<div class="card" style="margin-bottom:0;"><h2 style="font-size:20px; font-weight:700; margin-bottom:16px;">🔍 题目搜索</h2><div style="position:relative; margin-bottom:8px;"><input type="text" id="searchInput" class="input" placeholder="输入关键词搜索题目、选项或章节名..." style="width:100%; padding:14px 20px 14px 48px; font-size:16px; border-radius:var(--radius-lg); box-sizing:border-box;"><span style="position:absolute; left:16px; top:50%; transform:translateY(-50%); font-size:18px; pointer-events:none;">🔍</span><button id="searchClear" style="position:absolute; right:14px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer; color:var(--text-sub); font-size:20px; display:none;">✕</button></div><div id="searchMeta" style="font-size:13px; color:var(--text-sub); font-weight:500; margin-bottom:4px; min-height:20px;"></div></div><div id="searchResults" style="margin-top:12px;"></div>';
+  container.innerHTML = `<div class="page-heading"><div><h1>题目搜索</h1><p>搜索题干、章节、选项、答案和解析。</p></div></div><div class="card search-panel"><div class="search-input-wrap">${icon('search')}<input type="search" id="searchInput" class="input" placeholder="输入关键词搜索题库..." autocomplete="off"><button type="button" id="searchClear" class="icon-button" aria-label="清除搜索" hidden>${icon('close')}</button></div><div id="searchMeta" class="search-meta"></div></div><div id="searchResults" class="search-results"></div>`;
 
   const input = $id('searchInput');
   const meta = $id('searchMeta');
@@ -1444,7 +1535,7 @@ function renderSearch(container) {
   }
 
   function doSearch(query) {
-    clearBtn.style.display = query ? '' : 'none';
+    clearBtn.hidden = !query;
     if (!query.trim()) {
       meta.textContent = '题库共 ' + questionBank.length + ' 题，输入关键词开始搜索';
       results.innerHTML = '';
@@ -1460,7 +1551,7 @@ function renderSearch(container) {
     );
     meta.textContent = '找到 ' + matched.length + ' 道题';
     if (!matched.length) {
-      results.innerHTML = '<div class="card"><div class="empty-state" style="padding:48px 24px;"><div class="empty-state-icon">🔍</div><div class="empty-state-title">未找到相关题目</div><div class="empty-state-desc">请尝试其他关键词</div></div></div>';
+      results.innerHTML = `<div class="card"><div class="empty-state" style="padding:48px 24px;"><div class="empty-state-icon">${icon('search_off')}</div><div class="empty-state-title">未找到相关题目</div><div class="empty-state-desc">请尝试其他关键词</div></div></div>`;
       return;
     }
     results.innerHTML = matched.map(q => {
@@ -1477,7 +1568,7 @@ function renderSearch(container) {
       return `<div class="search-result-card">
         <div class="search-result-heading">
           <div><span class="tag ${meta.tagClass}">${meta.shortLabel}</span><span class="search-chapter">${esc(q.chapter)}</span></div>
-          <button class="btn btn-sm quiz-bookmark-btn ${isBm ? 'bookmarked' : ''} search-bm-btn" data-id="${escAttr(q.id)}" title="${isBm ? '取消收藏' : '收藏此题'}">${isBm ? '⭐' : '☆'}</button>
+          <button class="quiz-icon-action quiz-bookmark-btn ${isBm ? 'bookmarked' : ''} search-bm-btn" data-id="${escAttr(q.id)}" title="${isBm ? '取消收藏' : '收藏此题'}" aria-label="${isBm ? '取消收藏' : '收藏此题'}">${icon(isBm ? 'star' : 'star_outline')}</button>
         </div>
         <div class="search-question">${highlight(q.question, query)}</div>
         ${renderQuestionImage(q, 'result-question-image')}
@@ -1490,8 +1581,8 @@ function renderSearch(container) {
         e.stopPropagation();
         const qId = this.dataset.id;
         const bi = bookmarks.indexOf(qId);
-        if (bi >= 0) { bookmarks.splice(bi, 1); this.textContent = '☆'; this.classList.remove('bookmarked'); this.title='收藏此题'; }
-        else { bookmarks.push(qId); this.textContent = '⭐'; this.classList.add('bookmarked'); this.title='取消收藏'; }
+        if (bi >= 0) { bookmarks.splice(bi, 1); this.innerHTML = icon('star_outline'); this.classList.remove('bookmarked'); this.title='收藏此题'; }
+        else { bookmarks.push(qId); this.innerHTML = icon('star'); this.classList.add('bookmarked'); this.title='取消收藏'; }
         await persist();
       });
     });
@@ -1524,69 +1615,70 @@ function renderExamConfig(container) {
   }
 
   const totalSingle = questionBank.filter(q => q.type === 'single').length;
-  const totalMulti = questionBank.filter(q => q.type === 'multi').length;
   const totalFill = questionBank.filter(q => q.type === 'fill').length;
+  const defaultSingle = Math.min(10, totalSingle);
+  const defaultFill = Math.min(5, totalFill);
 
   container.innerHTML = `
-    <div class="card">
-      <h2 style="font-size:20px; font-weight:700; margin-bottom:20px;">模拟考试配置</h2>
-
-      <div style="margin-bottom:24px">
-        <p style="margin-bottom:12px; font-weight:600">选择章节：</p>
+    <div class="page-heading"><div><h1>配置模拟考试</h1><p>选择考试章节，并设置各题型数量。系统会从所选范围随机组卷。</p></div></div>
+    <div class="exam-layout">
+      <section class="card exam-panel">
+        <div class="exam-section-title"><div><h2>选择章节</h2><p>选择一个或多个内容范围</p></div><div><button class="text-button" id="btnSelectAll">全选</button><button class="text-button" id="btnDeselectAll">清空</button></div></div>
         <div id="examChapters" class="exam-chapter-grid">
           ${chapters.map(ch => {
             const single = questionBank.filter(q => q.chapter === ch && q.type === 'single').length;
-            const multi = questionBank.filter(q => q.chapter === ch && q.type === 'multi').length;
             const fill = questionBank.filter(q => q.chapter === ch && q.type === 'fill').length;
             return `<label class="exam-chapter-card selected">
               <input type="checkbox" value="${escAttr(ch)}" class="exam-chk" checked>
               <div class="exam-chapter-card-body">
                 <div class="exam-chapter-card-name">${esc(ch)}</div>
-                <div class="exam-chapter-card-count">单选 ${single} · 多选 ${multi} · 填空 ${fill}</div>
+                <div class="exam-chapter-card-count">单选 ${single} · 填空 ${fill}</div>
               </div>
             </label>`;
           }).join('')}
         </div>
-        <div style="margin-top:14px; display:flex; gap:8px;">
-          <button class="btn btn-sm" id="btnSelectAll">全选</button>
-          <button class="btn btn-sm" id="btnDeselectAll">取消全选</button>
-        </div>
-      </div>
-
-      <div class="exam-count-row">
-        <div class="exam-count-item">
-          <div class="exam-count-label">单选题数</div>
-          <input type="number" class="exam-count-input" id="examSingleCount" value="${Math.min(10, totalSingle)}" min="0" max="${totalSingle}">
-          <div class="exam-count-sub">最多可选 ${totalSingle} 题</div>
-        </div>
-        <div class="exam-count-item">
-          <div class="exam-count-label">多选题数</div>
-          <input type="number" class="exam-count-input" id="examMultiCount" value="${Math.min(5, totalMulti)}" min="0" max="${totalMulti}">
-          <div class="exam-count-sub">最多可选 ${totalMulti} 题</div>
-        </div>
-        <div class="exam-count-item">
-          <div class="exam-count-label">填空题数</div>
-          <input type="number" class="exam-count-input" id="examFillCount" value="${Math.min(5, totalFill)}" min="0" max="${totalFill}">
-          <div class="exam-count-sub">最多可选 ${totalFill} 题</div>
-        </div>
-      </div>
-
-      <p style="color:var(--text-sub); font-size:13px; margin-bottom:20px; font-weight:500;">
-        题库共有：单选 <strong>${totalSingle}</strong> 题 · 多选 <strong>${totalMulti}</strong> 题 · 填空 <strong>${totalFill}</strong> 题
-        <span id="availableHint"></span>
-      </p>
-
-      <button class="btn btn-primary" id="btnStartExam" style="min-width:160px; padding:14px 28px; font-size:16px;">🚀 开始考试</button>
+        <p id="availableHint" class="page-subtitle" style="margin-top:16px"></p>
+      </section>
+      <aside class="exam-side">
+        <section class="card exam-panel">
+          <div class="exam-section-title"><div><h2>题型分布</h2><p>按题型设置抽题数量</p></div></div>
+          <div class="exam-count-row">
+            <label class="exam-count-item"><span class="exam-count-label">单选题</span><input type="number" class="exam-count-input" id="examSingleCount" value="${defaultSingle}" min="0" max="${totalSingle}"><span class="exam-count-sub">最多 ${totalSingle} 题</span></label>
+            <label class="exam-count-item"><span class="exam-count-label">填空题</span><input type="number" class="exam-count-input" id="examFillCount" value="${defaultFill}" min="0" max="${totalFill}"><span class="exam-count-sub">最多 ${totalFill} 题</span></label>
+          </div>
+          <div class="range-error" id="examConfigError" role="alert"></div>
+        </section>
+        <section class="exam-summary">
+          <h3>考试摘要</h3>
+          <div class="exam-summary-list">
+            <div class="exam-summary-row"><span>总题数</span><strong id="examSummaryTotal">${defaultSingle + defaultFill}</strong></div>
+            <div class="exam-summary-row"><span>考试总分</span><strong>100 分</strong></div>
+            <div class="exam-summary-row"><span>预计用时</span><strong id="examSummaryDuration">${Math.max(10, (defaultSingle + defaultFill) * 2)} 分钟</strong></div>
+          </div>
+          <div class="exam-summary-footer"><button class="btn" id="btnStartExam">${icon('play_circle')} 开始考试</button></div>
+        </section>
+      </aside>
     </div>
   `;
 
   function updateHint() {
     const selectedChs = [...document.querySelectorAll('.exam-chk:checked')].map(cb => cb.value);
     const availSingle = questionBank.filter(q => selectedChs.includes(q.chapter) && q.type === 'single').length;
-    const availMulti = questionBank.filter(q => selectedChs.includes(q.chapter) && q.type === 'multi').length;
     const availFill = questionBank.filter(q => selectedChs.includes(q.chapter) && q.type === 'fill').length;
     const hint = $id('availableHint');
-    if (hint) hint.textContent = ` · 已选章节可用：单选 ${availSingle} 题 · 多选 ${availMulti} 题 · 填空 ${availFill} 题`;
+    const singleCount = Math.max(0, parseInt($id('examSingleCount').value) || 0);
+    const fillCount = Math.max(0, parseInt($id('examFillCount').value) || 0);
+    const requested = singleCount + fillCount;
+    const issues = [];
+    if (!selectedChs.length) issues.push('请至少选择一个章节');
+    if (!requested) issues.push('请至少设置一种题型');
+    if (singleCount > availSingle) issues.push(`单选题最多可选 ${availSingle} 题`);
+    if (fillCount > availFill) issues.push(`填空题最多可选 ${availFill} 题`);
+    if (hint) hint.textContent = `已选章节可用：单选 ${availSingle} 题 · 填空 ${availFill} 题`;
+    $id('examSummaryTotal').textContent = requested;
+    $id('examSummaryDuration').textContent = `${Math.max(10, requested * 2)} 分钟`;
+    $id('examConfigError').textContent = issues[0] || '';
+    $id('btnStartExam').disabled = issues.length > 0;
   }
 
   updateHint();
@@ -1613,36 +1705,30 @@ function renderExamConfig(container) {
     });
     updateHint();
   });
+  ['examSingleCount', 'examFillCount'].forEach(id => $id(id).addEventListener('input', updateHint));
 
   $id('btnStartExam').addEventListener('click', () => {
     const selectedChs = [...document.querySelectorAll('.exam-chk:checked')].map(cb => cb.value);
-    if (selectedChs.length === 0) { alert('请至少选择一个章节'); return; }
+    if (selectedChs.length === 0) { $id('examConfigError').textContent = '请至少选择一个章节'; return; }
 
     const singleCount = parseInt($id('examSingleCount').value) || 0;
-    const multiCount = parseInt($id('examMultiCount').value) || 0;
     const fillCount = parseInt($id('examFillCount').value) || 0;
-    if (singleCount === 0 && multiCount === 0 && fillCount === 0) { alert('请至少设置一种题型的数量'); return; }
+    if (singleCount === 0 && fillCount === 0) { $id('examConfigError').textContent = '请至少设置一种题型的数量'; return; }
 
     const poolSingle = shuffle(questionBank.filter(q => selectedChs.includes(q.chapter) && q.type === 'single'));
-    const poolMulti = shuffle(questionBank.filter(q => selectedChs.includes(q.chapter) && q.type === 'multi'));
     const poolFill = shuffle(questionBank.filter(q => selectedChs.includes(q.chapter) && q.type === 'fill'));
 
     if (singleCount > poolSingle.length) {
-      alert(`单选题不足！需要 ${singleCount} 题，但只有 ${poolSingle.length} 题可用`);
-      return;
-    }
-    if (multiCount > poolMulti.length) {
-      alert(`多选题不足！需要 ${multiCount} 题，但只有 ${poolMulti.length} 题可用`);
+      $id('examConfigError').textContent = `单选题不足：需要 ${singleCount} 题，但只有 ${poolSingle.length} 题可用`;
       return;
     }
     if (fillCount > poolFill.length) {
-      alert(`填空题不足！需要 ${fillCount} 题，但只有 ${poolFill.length} 题可用`);
+      $id('examConfigError').textContent = `填空题不足：需要 ${fillCount} 题，但只有 ${poolFill.length} 题可用`;
       return;
     }
 
     const examQuestions = shuffle([
       ...poolSingle.slice(0, singleCount),
-      ...poolMulti.slice(0, multiCount),
       ...poolFill.slice(0, fillCount)
     ]);
 
@@ -1720,29 +1806,27 @@ function applyTheme(theme) {
   if (!btn) return;
   if (theme === 'dark') {
     document.body.classList.add('dark');
-    btn.innerHTML = `
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="5"></circle>
-        <line x1="12" y1="1" x2="12" y2="3"></line>
-        <line x1="12" y1="21" x2="12" y2="23"></line>
-        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-        <line x1="1" y1="12" x2="3" y2="12"></line>
-        <line x1="21" y1="12" x2="23" y2="12"></line>
-        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-      </svg>
-    `;
+    btn.innerHTML = icon('light_mode');
     btn.setAttribute('title', '切换至亮色模式');
+    btn.setAttribute('aria-label', '切换至亮色模式');
   } else {
     document.body.classList.remove('dark');
-    btn.innerHTML = `
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-      </svg>
-    `;
+    btn.innerHTML = icon('dark_mode');
     btn.setAttribute('title', '切换至暗色模式');
+    btn.setAttribute('aria-label', '切换至暗色模式');
   }
+}
+
+function initAppShell() {
+  $id('mobileMenuButton')?.addEventListener('click', () => document.body.classList.add('sidebar-open'));
+  $id('sidebarScrim')?.addEventListener('click', closeMobileSidebar);
+  $id('lockApplication')?.addEventListener('click', () => {
+    localStorage.removeItem('quiz_access');
+    document.documentElement.classList.add('access-locked');
+    const gate = $id('accessGate');
+    if (gate) gate.hidden = false;
+    $id('accessPassword')?.focus();
+  });
 }
 
 /* ================================================================
@@ -1823,6 +1907,7 @@ $id('container').addEventListener('click', function(e) {
 async function initApp() {
   await initData();
   initTheme();
+  initAppShell();
   renderPage();
 }
 

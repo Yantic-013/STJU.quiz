@@ -1,13 +1,14 @@
 /* ================================================================
    Service Worker — 刷题助手离线缓存
    ================================================================ */
-const CACHE_NAME = 'quiz-app-v17';
+const CACHE_NAME = 'quiz-app-v24';
 
 // 需要预缓存的核心资源
 const coreUrls = [
   './',
   './index.html',
   './styles.css',
+  './stitch-ui.css',
   './app.js',
   './data/default-questions.js'
 ];
@@ -15,7 +16,7 @@ const coreUrls = [
 const externalUrls = [
   'https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js',
   'https://cdn.jsdelivr.net/npm/localforage@1.10.0/dist/localforage.min.js',
-  'https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap'
+  'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0&display=swap'
 ];
 
 // 安装：预缓存核心资源
