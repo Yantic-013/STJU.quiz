@@ -1329,6 +1329,30 @@ body.dark .upload-zone-lg:hover { background: rgba(139,92,246,0.1); }
   font-weight: 700;
   color: var(--text-main);
 }
+
+.fill-answer-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fill-order-badge {
+  padding: 4px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--primary-light);
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.fill-answer-help {
+  color: var(--text-sub);
+  font-size: 13px;
+  line-height: 1.65;
+}
 .fill-answer-field {
   display: grid;
   grid-template-columns: minmax(72px, auto) 1fr;
