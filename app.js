@@ -171,8 +171,43 @@ function formatQuestionAnswer(question) {
   return question.answer.join(', ');
 }
 
+const BUILTIN_QUESTION_IMAGES = Object.freeze({
+  'JXSJ-02-006': './assets/question-images/JXSJ-02-006.webp',
+  'JXSJ-02-007': './assets/question-images/JXSJ-02-007.webp',
+  'JXSJ-02-010': './assets/question-images/JXSJ-02-010.webp',
+  'JXSJ-02-021': './assets/question-images/JXSJ-02-021.webp',
+  'JXSJ-03-005': './assets/question-images/JXSJ-03-005.webp',
+  'JXSJ-03-016': './assets/question-images/JXSJ-03-016.webp',
+  'JXSJ-04-019': './assets/question-images/JXSJ-04-019.webp',
+  'JXSJ-09-018': './assets/question-images/JXSJ-09-018.webp',
+  'JXSJ-10-004': './assets/question-images/JXSJ-10-004.webp',
+  'JXSJ-10-013': './assets/question-images/JXSJ-10-013.webp',
+  'JXSJ-10-014': './assets/question-images/JXSJ-10-014.webp',
+  'JXSJ-10-015': './assets/question-images/JXSJ-10-015.webp',
+  'JXSJ-11-020': './assets/question-images/JXSJ-11-020.webp',
+  'JXSJ-12-005': './assets/question-images/JXSJ-12-005.webp',
+  'MD-FILL-02-007': './assets/question-images/MD-FILL-02-007.webp',
+  'MD-FILL-04-016': './assets/question-images/MD-FILL-04-016.webp',
+  'MD-FILL-11-017': './assets/question-images/MD-FILL-11-017.webp',
+  'MD-FILL-11-018': './assets/question-images/MD-FILL-11-018.webp',
+  'MD-FILL-12-005': './assets/question-images/MD-FILL-12-005.webp',
+  'JX-PM-021': './assets/question-images/JX-PM-021.webp',
+  'JX-LG-028': './assets/question-images/JX-LG-028.webp',
+  'JX-LG-029': './assets/question-images/JX-LG-029.webp',
+  'JX-TL-014': './assets/question-images/JX-TL-014.webp',
+  'JX-LX-015': './assets/question-images/JX-LX-015.webp',
+  'JX-LX-016': './assets/question-images/JX-LX-016.webp',
+  'JX-TK-LG-019': './assets/question-images/JX-TK-LG-019.webp',
+  'JX-TK-LG-021': './assets/question-images/JX-TK-LG-021.webp',
+  'JX-TK-LG-038': './assets/question-images/JX-TK-LG-038.webp',
+  'JX-TK-LG-041': './assets/question-images/JX-TK-LG-041.webp',
+  'JX-TK-CL-044': './assets/question-images/JX-TK-CL-044.webp',
+  'JX-TK-CL-045': './assets/question-images/JX-TK-CL-045.webp',
+  'JX-TK-LX-017': './assets/question-images/JX-TK-LX-017.webp'
+});
+
 function questionImageSource(question) {
-  return questionImages[question.id] || question.image || '';
+  return questionImages[question.id] || question.image || BUILTIN_QUESTION_IMAGES[question.id] || '';
 }
 
 function renderQuestionImage(question, className = 'question-image') {
@@ -1743,8 +1778,49 @@ function countValidErrors() {
   return errorBook.filter(e => questionBank.some(q => q.id === e.questionId)).length;
 }
 
+function chapterSequenceNumber(chapterName) {
+  const subName = String(chapterName).split(' - ').slice(1).join(' - ') || String(chapterName);
+  const match = subName.match(/^\s*(?:第\s*)?[（(]?\s*([0-9]+|[零〇一二两三四五六七八九十百]+)\s*[）)]?/);
+  if (!match) return Number.POSITIVE_INFINITY;
+
+  const numeral = match[1];
+  if (/^\d+$/.test(numeral)) return Number(numeral);
+
+  const digits = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const units = { 十: 10, 百: 100 };
+  let total = 0;
+  let currentDigit = 0;
+
+  for (const char of numeral) {
+    if (Object.prototype.hasOwnProperty.call(digits, char)) {
+      currentDigit = digits[char];
+    } else if (units[char]) {
+      total += (currentDigit || 1) * units[char];
+      currentDigit = 0;
+    }
+  }
+
+  return total + currentDigit;
+}
+
+function compareChapterNames(a, b) {
+  const [parentA, ...subPartsA] = String(a).split(' - ');
+  const [parentB, ...subPartsB] = String(b).split(' - ');
+
+  // Keep the existing source-group order, then sort chapters by their displayed number.
+  if (parentA !== parentB) return parentA < parentB ? -1 : 1;
+
+  const sequenceA = chapterSequenceNumber(a);
+  const sequenceB = chapterSequenceNumber(b);
+  if (sequenceA !== sequenceB) return sequenceA - sequenceB;
+
+  const subNameA = subPartsA.join(' - ') || parentA;
+  const subNameB = subPartsB.join(' - ') || parentB;
+  return subNameA.localeCompare(subNameB, 'zh-CN', { numeric: true });
+}
+
 function getChapters() {
-  return [...new Set(questionBank.map(q => q.chapter))].sort();
+  return [...new Set(questionBank.map(q => q.chapter))].sort(compareChapterNames);
 }
 
 function addToErrorBook(questionId) {
