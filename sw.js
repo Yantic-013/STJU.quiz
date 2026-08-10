@@ -1,7 +1,42 @@
 /* ================================================================
    Service Worker — 刷题助手离线缓存
    ================================================================ */
-const CACHE_NAME = 'quiz-app-v24';
+const CACHE_NAME = 'quiz-app-v28';
+
+const questionImageUrls = [
+  './assets/question-images/JXSJ-02-006.webp',
+  './assets/question-images/JXSJ-02-007.webp',
+  './assets/question-images/JXSJ-02-010.webp',
+  './assets/question-images/JXSJ-02-021.webp',
+  './assets/question-images/JXSJ-03-005.webp',
+  './assets/question-images/JXSJ-03-016.webp',
+  './assets/question-images/JXSJ-04-019.webp',
+  './assets/question-images/JXSJ-09-018.webp',
+  './assets/question-images/JXSJ-10-004.webp',
+  './assets/question-images/JXSJ-10-013.webp',
+  './assets/question-images/JXSJ-10-014.webp',
+  './assets/question-images/JXSJ-10-015.webp',
+  './assets/question-images/JXSJ-11-020.webp',
+  './assets/question-images/JXSJ-12-005.webp',
+  './assets/question-images/MD-FILL-02-007.webp',
+  './assets/question-images/MD-FILL-04-016.webp',
+  './assets/question-images/MD-FILL-11-017.webp',
+  './assets/question-images/MD-FILL-11-018.webp',
+  './assets/question-images/MD-FILL-12-005.webp',
+  './assets/question-images/JX-PM-021.webp',
+  './assets/question-images/JX-LG-028.webp',
+  './assets/question-images/JX-LG-029.webp',
+  './assets/question-images/JX-TL-014.webp',
+  './assets/question-images/JX-LX-015.webp',
+  './assets/question-images/JX-LX-016.webp',
+  './assets/question-images/JX-TK-LG-019.webp',
+  './assets/question-images/JX-TK-LG-021.webp',
+  './assets/question-images/JX-TK-LG-038.webp',
+  './assets/question-images/JX-TK-LG-041.webp',
+  './assets/question-images/JX-TK-CL-044.webp',
+  './assets/question-images/JX-TK-CL-045.webp',
+  './assets/question-images/JX-TK-LX-017.webp'
+];
 
 // 需要预缓存的核心资源
 const coreUrls = [
@@ -10,7 +45,8 @@ const coreUrls = [
   './styles.css',
   './stitch-ui.css',
   './app.js',
-  './data/default-questions.js'
+  './data/default-questions.js',
+  ...questionImageUrls
 ];
 
 const externalUrls = [
