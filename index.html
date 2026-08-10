@@ -7,7 +7,7 @@
   }
 </script>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="刷题助手">
@@ -54,15 +54,17 @@
       <div><strong>刷题助手</strong><span>Study Assistant</span></div>
     </div>
     <nav class="sidebar-nav" aria-label="主导航">
-      <button type="button" class="nav-item active" data-page="practice"><span class="material-symbols-outlined">dashboard</span><span>章节练习</span></button>
+      <button type="button" class="nav-item active" data-page="today"><span class="material-symbols-outlined">today</span><span>今日学习</span></button>
+      <button type="button" class="nav-item" data-page="practice"><span class="material-symbols-outlined">dashboard</span><span>章节练习</span></button>
       <button type="button" class="nav-item" data-page="exam-config"><span class="material-symbols-outlined">assignment</span><span>模拟考试</span></button>
+      <button type="button" class="nav-item" data-page="analysis"><span class="material-symbols-outlined">monitoring</span><span>学习分析</span></button>
       <button type="button" class="nav-item" data-page="errors"><span class="material-symbols-outlined">error</span><span>错题集</span></button>
       <button type="button" class="nav-item" data-page="bookmarks"><span class="material-symbols-outlined">grade</span><span>收藏集</span></button>
       <button type="button" class="nav-item" data-page="search"><span class="material-symbols-outlined">search</span><span>题目搜索</span></button>
       <button type="button" class="nav-item" data-page="manage"><span class="material-symbols-outlined">settings</span><span>题库管理</span></button>
     </nav>
     <div class="sidebar-bottom">
-      <button type="button" class="sidebar-cta" data-page="practice"><span class="material-symbols-outlined">play_arrow</span> 开始练习</button>
+      <button type="button" class="sidebar-cta" data-page="today"><span class="material-symbols-outlined">play_arrow</span> 开始今日学习</button>
       <button type="button" class="sidebar-link"><span class="material-symbols-outlined">help</span> 使用帮助</button>
       <button type="button" class="sidebar-link" id="lockApplication"><span class="material-symbols-outlined">logout</span> 锁定应用</button>
     </div>
@@ -83,16 +85,17 @@
   </main>
 
   <nav class="mobile-nav" id="mobileNav" aria-label="移动端导航">
-    <button type="button" class="nav-item active" data-page="practice"><span class="material-symbols-outlined">dashboard</span><span>练习</span></button>
+    <button type="button" class="nav-item active" data-page="today"><span class="material-symbols-outlined">today</span><span>今日</span></button>
+    <button type="button" class="nav-item" data-page="practice"><span class="material-symbols-outlined">dashboard</span><span>练习</span></button>
     <button type="button" class="nav-item" data-page="exam-config"><span class="material-symbols-outlined">assignment</span><span>考试</span></button>
+    <button type="button" class="nav-item" data-page="analysis"><span class="material-symbols-outlined">monitoring</span><span>分析</span></button>
     <button type="button" class="nav-item" data-page="errors"><span class="material-symbols-outlined">error</span><span>错题</span></button>
-    <button type="button" class="nav-item" data-page="bookmarks"><span class="material-symbols-outlined">grade</span><span>收藏</span></button>
-    <button type="button" class="nav-item" data-page="manage"><span class="material-symbols-outlined">more_horiz</span><span>更多</span></button>
   </nav>
   <button class="sidebar-scrim" id="sidebarScrim" type="button" aria-label="关闭导航"></button>
 </div>
 
 <script src="./data/default-questions.js"></script>
+<script src="./study-engine.js"></script>
 <script src="./app.js"></script>
 <script>
   (function() {
