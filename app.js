@@ -224,6 +224,11 @@ let errorBook = [];
 let bookmarks = [];
 let settings = {};
 let questionImages = {};
+let studyPlan = null;
+let questionProgress = {};
+let dailyStudyRecords = [];
+let activeStudySession = null;
+let studySettings = {};
 
 // 异步加载与历史迁移
 async function initData() {
@@ -233,6 +238,11 @@ async function initData() {
     let bm = await loadData('bookmarks');
     let setts = await loadData('settings');
     let images = await loadData('questionImages');
+    let plan = await loadData('studyPlan');
+    let progress = await loadData('questionProgress');
+    let records = await loadData('dailyStudyRecords');
+    let activeSession = await loadData('activeStudySession');
+    let savedStudySettings = await loadData('studySettings');
 
     // 如果 IndexedDB 没有数据，且 localStorage 也没有旧数据，则自动加载内置默认题库
     let isNewUser = false;
@@ -267,6 +277,11 @@ async function initData() {
     bookmarks = bm || [];
     settings = setts || {};
     questionImages = images || {};
+    studyPlan = plan || null;
+    questionProgress = progress && typeof progress === 'object' ? progress : {};
+    dailyStudyRecords = Array.isArray(records) ? records : [];
+    activeStudySession = activeSession || null;
+    studySettings = savedStudySettings || {};
 
     // 数据库迁移与版本升级：清理早期默认数据并载入内置题库。
     if ((parseInt(String(settings.dbVersion || '').replace(/\D/g, ''), 10) || 0) < 12) {
@@ -372,6 +387,21 @@ async function initData() {
       migrated = true;
     }
 
+    // v17：加入学习计划、掌握度和每日学习记录。旧错题只作为初始弱项，不伪造答题历史。
+    if ((parseInt(String(settings.dbVersion || '').replace(/\D/g, ''), 10) || 0) < 17) {
+      questionProgress = StudyEngine.reconcileProgress(
+        questionBank.map(question => question.id),
+        questionProgress,
+        errorBook,
+        StudyEngine.dateKey()
+      );
+      settings.dbVersion = 'v17';
+      migrated = true;
+    }
+
+    syncStudyProgress();
+    if (rollOverStaleStudySession()) migrated = true;
+
     if (migrated || isNewUser) {
       console.log(isNewUser ? 'Loaded default embedded question bank.' : 'Migrated old localStorage data to IndexedDB.');
       await persist();
@@ -382,17 +412,53 @@ async function initData() {
 }
 
 async function persist() {
+  syncStudyProgress();
   await saveData('questionBank', questionBank);
   await saveData('errorBook', errorBook);
   await saveData('bookmarks', bookmarks);
   await saveData('settings', settings);
   await saveData('questionImages', questionImages);
+  await saveData('studyPlan', studyPlan);
+  await saveData('questionProgress', questionProgress);
+  await saveData('dailyStudyRecords', dailyStudyRecords);
+  await saveData('activeStudySession', activeStudySession);
+  await saveData('studySettings', studySettings);
+}
+
+function syncStudyProgress() {
+  questionProgress = StudyEngine.reconcileProgress(
+    questionBank.map(question => question.id),
+    questionProgress,
+    errorBook,
+    StudyEngine.dateKey()
+  );
+  const validIds = new Set(questionBank.map(question => String(question.id)));
+  if (activeStudySession?.items) {
+    activeStudySession.items = activeStudySession.items.filter(item => validIds.has(String(item.questionId)));
+    activeStudySession.currentIndex = Math.min(
+      activeStudySession.currentIndex || 0,
+      Math.max(0, activeStudySession.items.length - 1)
+    );
+  }
+}
+
+async function persistStudyState() {
+  syncStudyProgress();
+  await Promise.all([
+    saveData('errorBook', errorBook),
+    saveData('bookmarks', bookmarks),
+    saveData('studyPlan', studyPlan),
+    saveData('questionProgress', questionProgress),
+    saveData('dailyStudyRecords', dailyStudyRecords),
+    saveData('activeStudySession', activeStudySession),
+    saveData('studySettings', studySettings)
+  ]);
 }
 
 /* ================================================================
    导航
    ================================================================ */
-let currentPage = 'practice';
+let currentPage = 'today';
 
 function icon(name, className = '') {
   return `<span class="material-symbols-outlined ${className}" aria-hidden="true">${name}</span>`;
@@ -456,15 +522,18 @@ document.addEventListener('click', function(e) {
    ================================================================ */
 function renderPage() {
   const c = $id('container');
-  document.body.classList.remove('quiz-active', 'result-active');
+  document.body.classList.remove('quiz-active', 'result-active', 'study-active');
   c.className = `container app-container page-${currentPage}`;
   syncNavigation();
   switch (currentPage) {
+    case 'today': renderTodayPage(c); break;
     case 'practice': renderChapterList(c); break;
     case 'exam-config': renderExamConfig(c); break;
     case 'errors': renderErrorBook(c); break;
     case 'bookmarks': renderBookmarks(c); break;
     case 'search': renderSearch(c); break;
+    case 'analysis': renderLearningAnalysis(c); break;
+    case 'plan-settings': renderPlanSettings(c); break;
     case 'manage': renderManage(c); break;
   }
   window.scrollTo({ top: 0, behavior: 'instant' });
@@ -548,13 +617,18 @@ function renderManage(container) {
   $id('btnChooseImages').addEventListener('click', () => $id('imageInput').click());
   $id('imageInput').addEventListener('change', handleImageImport);
   $id('btnExport').addEventListener('click', () => downloadJSON('quiz-app-backup.json', {
-      version: 16,
+    version: 17,
     exportedAt: new Date().toISOString(),
     questionBank,
     errorBook,
     bookmarks,
     settings,
-    questionImages
+    questionImages,
+    studyPlan,
+    questionProgress,
+    dailyStudyRecords,
+    activeStudySession,
+    studySettings
   }));
   $id('btnExportErrors').addEventListener('click', () => {
     const data = errorBook.map(e => {
@@ -791,6 +865,682 @@ async function handleImageImport(event) {
 function showImportMsg(type, text) {
   const el = $id('importMsg');
   if (el) el.innerHTML = `<div class="msg msg-${type}">${esc(text)}</div>`;
+}
+
+/* ================================================================
+   学习规划、今日任务与学习分析
+   ================================================================ */
+function studyToday() {
+  return StudyEngine.dateKey();
+}
+
+function friendlyStudyDate(value, includeYear = false) {
+  if (!value) return '待生成';
+  const date = new Date(`${value}T00:00:00`);
+  return new Intl.DateTimeFormat('zh-CN', {
+    ...(includeYear ? { year: 'numeric' } : {}),
+    month: 'short',
+    day: 'numeric'
+  }).format(date);
+}
+
+function weekdayLabel(value) {
+  const date = new Date(`${value}T00:00:00`);
+  return new Intl.DateTimeFormat('zh-CN', { weekday: 'short' }).format(date);
+}
+
+function getDailyStudyRecord(date, create = false) {
+  let record = dailyStudyRecords.find(item => item.date === date);
+  if (!record && create) {
+    record = { date, results: [] };
+    dailyStudyRecords.push(record);
+  }
+  return record || null;
+}
+
+function rollOverStaleStudySession() {
+  if (!activeStudySession?.date || activeStudySession.date >= studyToday()) return false;
+  const completedItems = (activeStudySession.items || []).filter(item => item.correct !== null);
+  if (completedItems.length) {
+    completedItems.forEach(item => {
+      const id = String(item.questionId);
+      const previous = questionProgress[id] || StudyEngine.createProgress(id);
+      questionProgress[id] = StudyEngine.applyPlannedResult(previous, {
+        correct: item.correct,
+        familiar: Boolean(item.correct),
+        date: activeStudySession.date
+      });
+    });
+    const record = getDailyStudyRecord(activeStudySession.date, true);
+    const rolledResults = completedItems.map(item => ({
+      questionId: String(item.questionId),
+      correct: Boolean(item.correct),
+      mode: 'planned',
+      kind: item.kind
+    }));
+    record.results = (record.results || []).filter(result => result.mode !== 'planned').concat(rolledResults);
+    record.plannedQuestionIds = activeStudySession.items.map(item => String(item.questionId));
+    record.completedQuestionIds = completedItems.map(item => String(item.questionId));
+    record.reviewCount = completedItems.filter(item => item.kind === 'review').length;
+    record.newCount = completedItems.filter(item => item.kind === 'new').length;
+    record.completedCount = completedItems.length;
+    record.correctCount = completedItems.filter(item => item.correct).length;
+    record.wrongCount = completedItems.filter(item => !item.correct).length;
+    record.unfamiliarIds = [];
+    record.unfamiliarCount = 0;
+    record.startedAt = activeStudySession.startedAt;
+    record.rolledOverAt = new Date().toISOString();
+  }
+  activeStudySession = null;
+  return true;
+}
+
+function completedStudyDayCount() {
+  return dailyStudyRecords.filter(record => record.completedAt).length;
+}
+
+function planScheduleForToday() {
+  const date = studyToday();
+  if (activeStudySession?.date === date && activeStudySession.items?.length) {
+    const reviewIds = activeStudySession.items.filter(item => item.kind === 'review').map(item => item.questionId);
+    const newIds = activeStudySession.items.filter(item => item.kind === 'new').map(item => item.questionId);
+    return {
+      date,
+      reviewIds,
+      newIds,
+      questionIds: activeStudySession.items.map(item => item.questionId),
+      dueTotal: reviewIds.length,
+      overdueCarry: activeStudySession.overdueCarry || 0,
+      unseenTotal: StudyEngine.overview(questionBank.map(question => question.id), questionProgress, date).unseen,
+      neededNew: newIds.length,
+      totalLimit: studyPlan.dailyTotalLimit,
+      newLimit: studyPlan.dailyNewLimit
+    };
+  }
+  const record = getDailyStudyRecord(date);
+  return StudyEngine.scheduleDay(
+    studyPlan,
+    questionBank.map(question => question.id),
+    questionProgress,
+    date,
+    record?.completedQuestionIds || []
+  );
+}
+
+function renderTodayPage(container) {
+  if (!questionBank.length) {
+    container.innerHTML = `
+      <div class="empty-state today-empty-state">
+        <div class="empty-state-icon">${icon('menu_book')}</div>
+        <div class="empty-state-title">先准备题库，再建立学习计划</div>
+        <div class="empty-state-desc">当前没有可规划的题目。导入题库后，系统会按目标日期和每日上限自动拆分任务。</div>
+        <button class="btn btn-primary" data-page="manage">去题库管理</button>
+      </div>`;
+    return;
+  }
+  if (!studyPlan) {
+    renderPlanSetup(container);
+    return;
+  }
+
+  const date = studyToday();
+  const record = getDailyStudyRecord(date);
+  const dayComplete = Boolean(record?.completedAt);
+  const schedule = planScheduleForToday();
+  const overview = StudyEngine.overview(questionBank.map(question => question.id), questionProgress, date);
+  const firstPassDate = StudyEngine.forecastFirstPass(studyPlan, questionBank.map(question => question.id), questionProgress, date);
+  const masteryDate = StudyEngine.forecastMastery(
+    studyPlan,
+    questionBank.map(question => question.id),
+    questionProgress,
+    date,
+    completedStudyDayCount()
+  );
+  const loads = StudyEngine.forecastLoad(studyPlan, questionBank.map(question => question.id), questionProgress, date, 7);
+  const weak = StudyEngine.weakChapters(questionBank, questionProgress, dailyStudyRecords, date).slice(0, 3);
+  const maxLoad = Math.max(1, ...loads.map(item => item.total));
+  const activeAnswered = activeStudySession?.date === date
+    ? activeStudySession.items.filter(item => item.correct !== null).length
+    : 0;
+  const taskTotal = dayComplete
+    ? Number(record.completedCount || record.completedQuestionIds?.length || 0)
+    : schedule.questionIds.length;
+  const taskReview = dayComplete ? Number(record.reviewCount || 0) : schedule.reviewIds.length;
+  const taskNew = dayComplete ? Number(record.newCount || 0) : schedule.newIds.length;
+  const ctaLabel = activeStudySession?.date === date && activeAnswered > 0
+    ? `继续学习（${activeAnswered}/${taskTotal}）`
+    : '开始今日学习';
+  const forecastUnavailable = !firstPassDate && overview.unseen > 0;
+  const forecastDelayed = firstPassDate && firstPassDate > studyPlan.targetDate;
+
+  container.innerHTML = `
+    <div class="page-heading today-heading">
+      <div><h1>今日学习</h1><p>${friendlyStudyDate(date, true)} · 按到期复习优先安排，未完成任务会保持负担并自动顺延。</p></div>
+      <button type="button" class="btn btn-secondary" data-page="plan-settings">${icon('tune')} 调整计划</button>
+    </div>
+
+    <section class="today-command ${dayComplete ? 'is-complete' : ''}" aria-labelledby="todayTaskTitle">
+      <div class="today-command-main">
+        <div class="today-status-mark">${icon(dayComplete ? 'task_alt' : 'auto_stories')}</div>
+        <div class="today-task-copy">
+          <span class="today-context">${dayComplete ? '今天已完成' : (activeAnswered ? '继续上次进度' : '今天的任务')}</span>
+          <h2 id="todayTaskTitle">${dayComplete ? `完成 ${taskTotal} 道题` : (taskTotal ? `复习 ${taskReview} 道，新学 ${taskNew} 道` : '今天暂无到期任务')}</h2>
+          <p>${dayComplete
+            ? `答对 ${record.correctCount || 0} 道，${record.unfamiliarCount || 0} 道已标记为仍不熟练。`
+            : (taskTotal
+              ? `共 ${taskTotal} 道，控制在每日总上限 ${studyPlan.dailyTotalLimit} 道以内。每题作答后立即查看答案。`
+              : (overview.unseen === 0 ? '首轮已覆盖完成；下一批复习会在到期日自动出现。' : '今日任务已处理完成，明天继续按计划推进。'))}</p>
+          ${schedule.overdueCarry > 0 && !dayComplete ? `<div class="today-carry-note">${icon('schedule')} 另有 ${schedule.overdueCarry} 道到期复习将顺延，不会临时提高今日上限。</div>` : ''}
+        </div>
+        ${dayComplete
+          ? `<button type="button" class="btn today-primary-action" data-page="analysis">查看学习分析 ${icon('arrow_forward')}</button>`
+          : `<button type="button" class="btn today-primary-action" id="btnStartToday" ${taskTotal ? '' : 'disabled'}>${icon(activeAnswered ? 'resume' : 'play_arrow')} ${ctaLabel}</button>`}
+      </div>
+      <div class="today-composition" aria-label="今日题目构成">
+        <span><i class="is-review"></i>到期复习 <strong>${taskReview}</strong></span>
+        <span><i class="is-new"></i>首轮新题 <strong>${taskNew}</strong></span>
+        <span><i class="is-total"></i>今日合计 <strong>${taskTotal}</strong></span>
+      </div>
+    </section>
+
+    <div class="today-plan-grid">
+      <section class="plan-progress-section" aria-labelledby="firstPassTitle">
+        <div class="section-title-row"><div><h2 id="firstPassTitle">首轮覆盖进度</h2><p>整套题库至少学习一遍</p></div><strong>${overview.coverage}%</strong></div>
+        <div class="plan-progress-track"><span style="width:${overview.coverage}%"></span></div>
+        <div class="plan-progress-meta"><span>已学习 ${overview.learned} / ${overview.total}</span><span>已掌握 ${overview.mastered} 道</span></div>
+      </section>
+      <aside class="plan-date-panel" aria-label="计划日期">
+        <div class="plan-date-row"><span>原目标日期</span><strong>${friendlyStudyDate(studyPlan.targetDate, true)}</strong></div>
+        <div class="plan-date-row ${forecastDelayed || forecastUnavailable ? 'is-delayed' : ''}"><span>预计首轮完成</span><strong>${forecastUnavailable ? '当前上限无法持续推进' : friendlyStudyDate(firstPassDate, true)}</strong></div>
+        <div class="plan-date-row"><span>预计全部掌握</span><strong>${masteryDate ? friendlyStudyDate(masteryDate, true) : '完成 3 个学习日后生成'}</strong></div>
+        ${forecastUnavailable
+          ? `<p>${icon('warning')} 复习任务会长期占满每日总量。请提高总题量上限，系统才有余量继续安排全部新题。</p>`
+          : (forecastDelayed ? `<p>${icon('info')} 按当前负担预计顺延 ${StudyEngine.diffDays(studyPlan.targetDate, firstPassDate)} 天。</p>` : '<p>当前上限能够支撑首轮目标。</p>')}
+      </aside>
+    </div>
+
+    <section class="load-section" aria-labelledby="loadTitle">
+      <div class="section-title-row"><div><h2 id="loadTitle">未来 7 天负担</h2><p>按全部答对的基准情形预估；实际任务会随作答结果调整。</p></div><button type="button" class="text-button" data-page="analysis">查看周期复盘</button></div>
+      <div class="load-chart" role="img" aria-label="未来七天每日新题和复习题量">
+        ${loads.map(item => `
+          <div class="load-day ${item.date === date ? 'is-today' : ''}">
+            <div class="load-bars" title="复习 ${item.review} 道，新题 ${item.fresh} 道">
+              <span class="load-review" style="height:${Math.round(item.review / maxLoad * 100)}%"></span>
+              <span class="load-new" style="height:${Math.round(item.fresh / maxLoad * 100)}%"></span>
+            </div>
+            <strong>${item.total}</strong><span>${item.date === date ? '今天' : weekdayLabel(item.date)}</span>
+          </div>`).join('')}
+      </div>
+      <div class="load-legend"><span><i class="is-review"></i>到期复习</span><span><i class="is-new"></i>首轮新题</span></div>
+    </section>
+
+    <section class="weak-preview" aria-labelledby="weakPreviewTitle">
+      <div class="section-title-row"><div><h2 id="weakPreviewTitle">当前薄弱章节</h2><p>只统计已学习至少 5 道题的章节，未学习内容不会被误判为薄弱。</p></div><button type="button" class="text-button" data-page="analysis">查看全部分析</button></div>
+      ${weak.length ? `<div class="weak-preview-list">${weak.map((item, index) => `
+        <div class="weak-preview-row">
+          <span class="weak-rank">${index + 1}</span>
+          <div><strong>${esc(item.chapter)}</strong><span>已学 ${item.learned}/${item.total} · 近 30 天正确率 ${item.accuracy}%</span></div>
+          <div class="weak-mastery"><span>掌握度</span><strong>${item.mastery}%</strong></div>
+        </div>`).join('')}</div>` : `<div class="inline-empty">${icon('query_stats')} 完成更多题目后，这里会显示可信的薄弱章节。</div>`}
+    </section>`;
+
+  $id('btnStartToday')?.addEventListener('click', startTodayStudy);
+}
+
+function renderPlanSetup(container) {
+  const date = studyToday();
+  const recommendedNew = Math.min(15, Math.max(1, questionBank.length));
+  const recommendedDays = Math.max(1, Math.ceil(questionBank.length / recommendedNew));
+  const recommendedTarget = StudyEngine.addDays(date, recommendedDays - 1);
+  const legacyCount = Object.values(questionProgress).filter(item => item.legacyWrongCount > 0).length;
+
+  container.innerHTML = `
+    <div class="plan-setup-shell">
+      <section class="plan-setup-intro">
+        <span class="plan-setup-icon">${icon('calendar_month')}</span>
+        <h1>把整套题库变成每天可完成的计划</h1>
+        <p>你只需要设置首轮完成日期和每日上限。系统会优先安排到期复习，再用剩余额度推进新题；漏做时保持负担，预计日期自动顺延。</p>
+        <ul>
+          <li>${icon('check_circle')} 覆盖当前题库全部 ${questionBank.length} 道题</li>
+          <li>${icon('check_circle')} 新题与记忆复习混合安排</li>
+          <li>${icon('check_circle')} 数据只保存在当前设备，可随完整备份导出</li>
+        </ul>
+      </section>
+      <form class="plan-setup-form" id="planSetupForm">
+        <div class="form-heading"><h2>建立首轮计划</h2><p>之后可以随时调整日期和上限，已经形成的学习记录不会丢失。</p></div>
+        <label class="study-field"><span>首轮目标日期</span><input class="input" type="date" id="planTargetDate" min="${date}" value="${recommendedTarget}" required><small>表示整套题库至少学习一遍的日期。</small></label>
+        <div class="study-field-row">
+          <label class="study-field"><span>每日新题上限</span><input class="input" type="number" id="planNewLimit" min="1" max="200" value="${recommendedNew}" required><small>只限制第一次学习的题目。</small></label>
+          <label class="study-field"><span>每日总题量上限</span><input class="input" type="number" id="planTotalLimit" min="1" max="300" value="30" required><small>新题与复习题合计。</small></label>
+        </div>
+        ${legacyCount ? `<div class="plan-migration-note">${icon('history')} 检测到 ${legacyCount} 道旧错题。它们会作为初始弱项进入复习，但不会生成虚假的历史正确率。</div>` : ''}
+        <div class="form-message" id="planFormMessage" role="alert"></div>
+        <button type="submit" class="btn btn-primary plan-create-button">创建学习计划 ${icon('arrow_forward')}</button>
+      </form>
+    </div>`;
+
+  $id('planSetupForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const targetDate = $id('planTargetDate').value;
+    const dailyNewLimit = Number($id('planNewLimit').value);
+    const dailyTotalLimit = Number($id('planTotalLimit').value);
+    const message = $id('planFormMessage');
+    if (dailyNewLimit > dailyTotalLimit) {
+      message.textContent = '每日总题量上限不能小于每日新题上限。';
+      $id('planTotalLimit').focus();
+      return;
+    }
+    studyPlan = {
+      version: 1,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      startDate: date,
+      targetDate,
+      dailyNewLimit,
+      dailyTotalLimit,
+      initialQuestionCount: questionBank.length
+    };
+    studySettings = { ...studySettings, reviewPriority: true, stableDailyLoad: true };
+    await persistStudyState();
+    renderPage();
+  });
+}
+
+function interleaveStudyItems(reviewIds, newIds) {
+  const reviews = reviewIds.slice();
+  const fresh = newIds.slice();
+  const result = [];
+  let reviewRun = 0;
+  while (reviews.length || fresh.length) {
+    if (fresh.length && (!reviews.length || reviewRun >= 2)) {
+      result.push({ questionId: fresh.shift(), kind: 'new' });
+      reviewRun = 0;
+    } else if (reviews.length) {
+      result.push({ questionId: reviews.shift(), kind: 'review' });
+      reviewRun++;
+    } else {
+      result.push({ questionId: fresh.shift(), kind: 'new' });
+    }
+  }
+  return result;
+}
+
+async function startTodayStudy() {
+  const date = studyToday();
+  if (getDailyStudyRecord(date)?.completedAt) return;
+  if (activeStudySession?.date !== date || !activeStudySession.items?.length) {
+    const schedule = StudyEngine.scheduleDay(
+      studyPlan,
+      questionBank.map(question => question.id),
+      questionProgress,
+      date
+    );
+    if (!schedule.questionIds.length) return;
+    const items = interleaveStudyItems(schedule.reviewIds, schedule.newIds).map(item => {
+      const question = questionBank.find(candidate => String(candidate.id) === String(item.questionId));
+      const optionOrder = question?.type === 'fill'
+        ? []
+        : shuffle(question.options.map((_, index) => String.fromCharCode(65 + index)));
+      return {
+        ...item,
+        optionOrder,
+        answer: null,
+        displayAnswer: null,
+        correct: null,
+        answeredAt: null
+      };
+    });
+    activeStudySession = {
+      version: 1,
+      date,
+      startedAt: new Date().toISOString(),
+      currentIndex: 0,
+      overdueCarry: schedule.overdueCarry,
+      items
+    };
+    await persistStudyState();
+  }
+  renderStudyQuestion();
+}
+
+function preparedStudyQuestion(question, item) {
+  const normalized = normalizeQuestion(question);
+  if (normalized.type === 'fill') return { ...normalized, displayOptions: [], letterMap: {} };
+  const optionOrder = item.optionOrder?.length
+    ? item.optionOrder
+    : normalized.options.map((_, index) => String.fromCharCode(65 + index));
+  const letterMap = {};
+  const displayOptions = optionOrder.map((originalLetter, index) => {
+    const displayLetter = String.fromCharCode(65 + index);
+    letterMap[displayLetter] = originalLetter;
+    return { letter: displayLetter, originalLetter, text: normalized.options[originalLetter.charCodeAt(0) - 65] };
+  });
+  return { ...normalized, displayOptions, letterMap };
+}
+
+function renderStudyQuestion() {
+  if (!activeStudySession?.items?.length) {
+    navigateTo('today');
+    return;
+  }
+  const total = activeStudySession.items.length;
+  const index = Math.min(activeStudySession.currentIndex || 0, total - 1);
+  activeStudySession.currentIndex = index;
+  const item = activeStudySession.items[index];
+  const sourceQuestion = questionBank.find(question => String(question.id) === String(item.questionId));
+  if (!sourceQuestion) {
+    activeStudySession.items.splice(index, 1);
+    persistStudyState().then(renderStudyQuestion);
+    return;
+  }
+  const question = preparedStudyQuestion(sourceQuestion, item);
+  const isFill = question.type === 'fill';
+  const blankCount = isFill ? countFillBlanks(question) : 0;
+  const answered = item.correct !== null;
+  const selected = item.displayAnswer || [];
+  const typeMeta = questionTypeMeta(question.type);
+  const before = questionProgress[String(question.id)] || StudyEngine.createProgress(question.id);
+  const stage = StudyEngine.stageMeta(before.stage);
+  const reverseMap = Object.fromEntries(Object.entries(question.letterMap || {}).map(([display, original]) => [original, display]));
+  const correctDisplay = isFill
+    ? formatQuestionAnswer(question)
+    : question.answer.map(letter => reverseMap[letter] || letter).sort().join('、');
+  const answeredCount = activeStudySession.items.filter(sessionItem => sessionItem.correct !== null).length;
+  const nextLabel = index === total - 1 ? '完成今日任务' : '下一题';
+
+  document.body.classList.remove('result-active');
+  document.body.classList.add('quiz-active', 'study-active');
+  const container = $id('container');
+  container.className = 'container app-container plan-study-container';
+  container.innerHTML = `
+    <div class="study-session-page">
+      <header class="study-workbar">
+        <button type="button" class="quiz-exit" id="btnExitStudy">${icon('arrow_back')} 暂停并返回</button>
+        <div class="study-session-label"><strong>今日学习</strong><span>${item.kind === 'review' ? '到期复习' : '首轮新题'} · ${stage.label}</span></div>
+        <div class="study-session-progress"><span>${index + 1} / ${total}</span><div class="quiz-progress-track"><span style="width:${(index + 1) / total * 100}%"></span></div></div>
+      </header>
+      <div class="study-session-layout">
+        <aside class="study-session-rail" aria-label="今日学习进度">
+          <div class="study-rail-summary"><strong>${answeredCount}</strong><span>已完成 / ${total}</span></div>
+          <div class="study-rail-dots">${activeStudySession.items.map((sessionItem, dotIndex) => `
+            <span class="${dotIndex === index ? 'is-current' : ''} ${sessionItem.correct === true ? 'is-correct' : ''} ${sessionItem.correct === false ? 'is-wrong' : ''}" aria-label="第 ${dotIndex + 1} 题${sessionItem.correct === true ? '答对' : sessionItem.correct === false ? '答错' : '未作答'}">${dotIndex + 1}</span>`).join('')}</div>
+          <div class="study-rail-note">答对题目默认熟练；今天结束时，只需额外勾选仍不熟练的题。</div>
+        </aside>
+        <main class="study-question-main">
+          <article class="study-question-card">
+            <div class="quiz-header">
+              <div><span class="tag ${typeMeta.tagClass}">${typeMeta.label}</span><span class="study-kind-tag">${item.kind === 'review' ? '到期复习' : '首轮新题'}</span></div>
+              <button type="button" class="quiz-icon-action quiz-bookmark-btn ${bookmarks.includes(question.id) ? 'bookmarked' : ''}" id="btnToggleStudyBookmark" aria-label="${bookmarks.includes(question.id) ? '取消收藏此题' : '收藏此题'}">${icon(bookmarks.includes(question.id) ? 'star' : 'star_outline')}</button>
+            </div>
+            <div class="question-row"><div class="question-text">${esc(question.question)}</div></div>
+            ${renderQuestionImage(question)}
+            ${isFill ? `
+              <form class="fill-answer-panel study-fill-panel" id="studyFillForm">
+                <div class="fill-answer-heading"><div class="fill-answer-label">填写答案</div>${blankCount > 1 && question.answerOrder === 'any' ? '<span class="fill-order-badge">各空顺序可交换</span>' : ''}</div>
+                ${Array.from({ length: blankCount }, (_, fillIndex) => `<label class="fill-answer-field"><span>${blankCount > 1 ? `第 ${fillIndex + 1} 空` : '答案'}</span><input class="input fill-answer-input" data-fill-index="${fillIndex}" value="${escAttr((item.answer || [])[fillIndex] || '')}" autocomplete="off" ${answered ? 'disabled' : ''} required></label>`).join('')}
+                ${answered ? '' : '<button type="submit" class="btn btn-primary study-check-button">核对答案</button>'}
+              </form>` : `
+              <div class="options-grid study-options-grid" id="studyOptionsGrid">
+                ${question.displayOptions.map(option => {
+                  const picked = selected.includes(option.letter);
+                  const isCorrectOption = question.answer.includes(option.originalLetter);
+                  const stateClass = answered && isCorrectOption ? 'study-correct' : (answered && picked && !isCorrectOption ? 'study-wrong' : '');
+                  return `<button type="button" class="option-btn ${picked ? 'selected' : ''} ${stateClass}" data-letter="${option.letter}" ${answered ? 'disabled' : ''}><span class="option-letter">${option.letter}</span><span><strong>${option.letter}.</strong>&nbsp; ${esc(option.text)}</span></button>`;
+                }).join('')}
+              </div>`}
+            ${answered ? `
+              <div class="study-feedback ${item.correct ? 'is-correct' : 'is-wrong'}" role="status">
+                <div class="study-feedback-title">${icon(item.correct ? 'check_circle' : 'cancel')}<strong>${item.correct ? '回答正确' : '回答错误'}</strong></div>
+                <div class="study-answer-line"><span>${isFill ? '参考答案' : '正确答案'}</span><strong>${esc(correctDisplay)}</strong></div>
+                ${question.explanation ? `<div class="study-explanation"><strong>解析</strong><p>${esc(question.explanation)}</p></div>` : '<p class="study-no-explanation">本题暂无解析，请结合正确答案进行记忆。</p>'}
+              </div>` : ''}
+          </article>
+          <footer class="study-question-footer">
+            <span>${answered ? '已记录本题结果' : (isFill ? '填写后点击“核对答案”' : '选择一个答案后立即反馈')}</span>
+            <button type="button" class="btn btn-primary" id="btnStudyNext" ${answered ? '' : 'disabled'}>${nextLabel} ${icon(index === total - 1 ? 'task_alt' : 'arrow_forward')}</button>
+          </footer>
+        </main>
+      </div>
+    </div>`;
+
+  $id('btnExitStudy').addEventListener('click', async () => {
+    await persistStudyState();
+    navigateTo('today');
+  });
+  $id('btnToggleStudyBookmark').addEventListener('click', async () => {
+    const bookmarkIndex = bookmarks.indexOf(question.id);
+    if (bookmarkIndex >= 0) bookmarks.splice(bookmarkIndex, 1);
+    else bookmarks.push(question.id);
+    await persistStudyState();
+    renderStudyQuestion();
+  });
+
+  if (!answered && !isFill) {
+    $id('studyOptionsGrid').addEventListener('click', event => {
+      const button = event.target.closest('.option-btn');
+      if (button) evaluateStudyAnswer([button.dataset.letter]);
+    });
+  }
+  if (!answered && isFill) {
+    $id('studyFillForm').addEventListener('input', () => {
+      item.answer = [...document.querySelectorAll('.fill-answer-input')].map(input => input.value);
+      saveData('activeStudySession', activeStudySession);
+    });
+    $id('studyFillForm').addEventListener('submit', event => {
+      event.preventDefault();
+      evaluateStudyAnswer([...document.querySelectorAll('.fill-answer-input')].map(input => input.value));
+    });
+    document.querySelector('.fill-answer-input')?.focus();
+  }
+  $id('btnStudyNext').addEventListener('click', () => {
+    if (item.correct === null) return;
+    if (index === total - 1) renderStudyRecap();
+    else {
+      activeStudySession.currentIndex = index + 1;
+      persistStudyState().then(renderStudyQuestion);
+    }
+  });
+}
+
+async function evaluateStudyAnswer(displayAnswer) {
+  const item = activeStudySession.items[activeStudySession.currentIndex];
+  if (!item || item.correct !== null) return;
+  const sourceQuestion = questionBank.find(question => String(question.id) === String(item.questionId));
+  const question = preparedStudyQuestion(sourceQuestion, item);
+  const normalizedDisplay = Array.isArray(displayAnswer) ? displayAnswer : [displayAnswer];
+  const answer = question.type === 'fill'
+    ? normalizedDisplay.map(value => String(value || '').trim())
+    : normalizedDisplay.map(letter => question.letterMap[letter] || letter);
+  const correct = question.type === 'fill'
+    ? isFillAnswerCorrect(answer, question.answer, question.answerOrder)
+    : JSON.stringify([...answer].sort()) === JSON.stringify([...question.answer].sort());
+  item.answer = answer;
+  item.displayAnswer = question.type === 'fill' ? [] : normalizedDisplay;
+  item.correct = correct;
+  item.answeredAt = new Date().toISOString();
+  if (!correct) addToErrorBook(question.id, false);
+  await persistStudyState();
+  renderStudyQuestion();
+}
+
+function renderStudyRecap() {
+  const items = activeStudySession.items;
+  const correctItems = items.filter(item => item.correct === true);
+  const wrongItems = items.filter(item => item.correct === false);
+  document.body.classList.add('quiz-active', 'study-active');
+  const container = $id('container');
+  container.className = 'container app-container study-recap-container';
+  container.innerHTML = `
+    <div class="study-recap-page">
+      <header class="study-recap-heading">
+        <span class="study-recap-icon">${icon('fact_check')}</span>
+        <div><h1>完成前，再回顾一次</h1><p>只勾选答对但仍觉得不熟练的题；未勾选的正确题默认熟练，答错题已自动记为薄弱。</p></div>
+      </header>
+      <div class="study-recap-summary">
+        <span>今日共 <strong>${items.length}</strong> 题</span><span class="is-correct">答对 <strong>${correctItems.length}</strong></span><span class="is-wrong">答错 <strong>${wrongItems.length}</strong></span>
+      </div>
+      <section class="recap-section">
+        <div class="section-title-row"><div><h2>答对但仍不熟练</h2><p>这是可选项，不需要逐题确认。</p></div><span>${correctItems.length} 道可选</span></div>
+        ${correctItems.length ? `<div class="recap-question-list">${correctItems.map(item => {
+          const question = questionBank.find(candidate => String(candidate.id) === String(item.questionId));
+          return `<label class="recap-question-row"><input type="checkbox" value="${escAttr(String(item.questionId))}"><span>${icon('check_circle')}<span><strong>${esc(question?.question || '题目已删除')}</strong><small>${esc(question?.chapter || '历史题目')}</small></span></span></label>`;
+        }).join('')}</div>` : '<div class="inline-empty">今天没有答对的题，错误题已经自动安排到后续复习。</div>'}
+      </section>
+      ${wrongItems.length ? `<section class="recap-section recap-wrong-section"><div class="section-title-row"><div><h2>自动记为薄弱</h2><p>这些题会降低掌握阶段，并在明天优先复习。</p></div></div><div class="recap-wrong-list">${wrongItems.map(item => {
+        const question = questionBank.find(candidate => String(candidate.id) === String(item.questionId));
+        return `<div>${icon('cancel')}<span>${esc(question?.question || '题目已删除')}</span></div>`;
+      }).join('')}</div></section>` : ''}
+      <footer class="study-recap-footer"><button type="button" class="btn" id="btnBackToLastQuestion">返回上一题</button><button type="button" class="btn btn-primary" id="btnFinishStudyDay">完成今日任务 ${icon('task_alt')}</button></footer>
+    </div>`;
+  $id('btnBackToLastQuestion').addEventListener('click', renderStudyQuestion);
+  $id('btnFinishStudyDay').addEventListener('click', async () => {
+    const unfamiliarIds = [...document.querySelectorAll('.recap-question-row input:checked')].map(input => input.value);
+    await finalizeStudyDay(unfamiliarIds);
+  });
+}
+
+async function finalizeStudyDay(unfamiliarIds) {
+  const session = activeStudySession;
+  if (!session) return;
+  const unfamiliar = new Set(unfamiliarIds.map(String));
+  session.items.forEach(item => {
+    const id = String(item.questionId);
+    const previous = questionProgress[id] || StudyEngine.createProgress(id);
+    questionProgress[id] = StudyEngine.applyPlannedResult(previous, {
+      correct: item.correct,
+      familiar: item.correct ? !unfamiliar.has(id) : false,
+      date: session.date
+    });
+  });
+
+  const record = getDailyStudyRecord(session.date, true);
+  const plannedResults = session.items.map(item => ({
+    questionId: String(item.questionId),
+    correct: Boolean(item.correct),
+    mode: 'planned',
+    kind: item.kind
+  }));
+  record.results = (record.results || []).filter(result => result.mode !== 'planned').concat(plannedResults);
+  record.plannedQuestionIds = session.items.map(item => String(item.questionId));
+  record.completedQuestionIds = record.plannedQuestionIds.slice();
+  record.reviewCount = session.items.filter(item => item.kind === 'review').length;
+  record.newCount = session.items.filter(item => item.kind === 'new').length;
+  record.completedCount = session.items.length;
+  record.correctCount = session.items.filter(item => item.correct).length;
+  record.wrongCount = session.items.filter(item => !item.correct).length;
+  record.unfamiliarIds = [...unfamiliar];
+  record.unfamiliarCount = unfamiliar.size;
+  record.startedAt = session.startedAt;
+  record.completedAt = new Date().toISOString();
+  activeStudySession = null;
+  await persistStudyState();
+  document.body.classList.remove('quiz-active', 'study-active');
+  navigateTo('today');
+}
+
+function renderPlanSettings(container) {
+  if (!studyPlan) {
+    navigateTo('today');
+    return;
+  }
+  const date = studyToday();
+  container.innerHTML = `
+    <div class="page-heading"><div><h1>学习计划设置</h1><p>调整后从下一次排题起生效，已经完成的学习记录和掌握度保持不变。</p></div><button type="button" class="btn" data-page="today">返回今日学习</button></div>
+    <div class="plan-settings-layout">
+      <form class="plan-settings-form" id="planSettingsForm">
+        <div class="form-heading"><h2>首轮目标与每日上限</h2><p>到期复习始终优先；复习超过总量时，新题会自动减少到 0。</p></div>
+        <label class="study-field"><span>首轮目标日期</span><input class="input" type="date" id="settingsTargetDate" min="${date}" value="${studyPlan.targetDate}" required></label>
+        <div class="study-field-row"><label class="study-field"><span>每日新题上限</span><input class="input" type="number" id="settingsNewLimit" min="1" max="200" value="${studyPlan.dailyNewLimit}" required></label><label class="study-field"><span>每日总题量上限</span><input class="input" type="number" id="settingsTotalLimit" min="1" max="300" value="${studyPlan.dailyTotalLimit}" required></label></div>
+        <div class="form-message" id="settingsFormMessage" role="alert"></div>
+        <button type="submit" class="btn btn-primary">保存计划设置</button>
+      </form>
+      <aside class="plan-rules-panel"><h2>当前排题规则</h2><dl><div><dt>计划范围</dt><dd>当前整套题库 ${questionBank.length} 道</dd></div><div><dt>复习顺序</dt><dd>逾期更久、阶段更低、最近答错优先</dd></div><div><dt>主观反馈</dt><dd>每天结束时只标记仍不熟练的正确题</dd></div><div><dt>漏做处理</dt><dd>保持每日上限，预计完成日期顺延</dd></div></dl><button type="button" class="text-button" data-page="analysis">查看掌握阶段与分析</button></aside>
+    </div>
+    <section class="plan-reset-zone"><div><h2>重新开始学习计划</h2><p>清空掌握度、每日记录和未完成会话；题库、错题集与收藏不会删除，旧错题会重新作为初始弱项。</p></div><button type="button" class="btn btn-destructive" id="btnResetStudyPlan">重新开始计划</button></section>`;
+
+  $id('planSettingsForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const dailyNewLimit = Number($id('settingsNewLimit').value);
+    const dailyTotalLimit = Number($id('settingsTotalLimit').value);
+    if (dailyNewLimit > dailyTotalLimit) {
+      $id('settingsFormMessage').textContent = '每日总题量上限不能小于每日新题上限。';
+      $id('settingsTotalLimit').focus();
+      return;
+    }
+    studyPlan = { ...studyPlan, targetDate: $id('settingsTargetDate').value, dailyNewLimit, dailyTotalLimit, updatedAt: new Date().toISOString() };
+    await persistStudyState();
+    navigateTo('today');
+  });
+  $id('btnResetStudyPlan').addEventListener('click', async () => {
+    const confirmed = await showConfirmDialog({
+      title: '重新开始学习计划？',
+      message: '掌握度、每日完成记录和未完成会话将被清空，且无法撤销。题库、错题集和收藏会保留。',
+      confirmText: '清空并重新开始',
+      cancelText: '保留当前计划',
+      danger: true
+    });
+    if (!confirmed) return;
+    questionProgress = StudyEngine.reconcileProgress(questionBank.map(question => question.id), {}, errorBook, date);
+    dailyStudyRecords = [];
+    activeStudySession = null;
+    studyPlan = { ...studyPlan, startDate: date, createdAt: new Date().toISOString(), updatedAt: null };
+    await persistStudyState();
+    navigateTo('today');
+  });
+}
+
+function renderLearningAnalysis(container) {
+  if (!studyPlan) {
+    container.innerHTML = `<div class="empty-state today-empty-state"><div class="empty-state-icon">${icon('monitoring')}</div><div class="empty-state-title">建立计划后开始积累学习分析</div><div class="empty-state-desc">分析来自正式学习记录，不会用旧错题伪造历史趋势。</div><button class="btn btn-primary" data-page="today">建立学习计划</button></div>`;
+    return;
+  }
+  const date = studyToday();
+  const overview = StudyEngine.overview(questionBank.map(question => question.id), questionProgress, date);
+  const weak = StudyEngine.weakChapters(questionBank, questionProgress, dailyStudyRecords, date);
+  const last30Start = StudyEngine.addDays(date, -29);
+  const recentResults = dailyStudyRecords.filter(record => record.date >= last30Start).flatMap(record => record.results || []);
+  const accuracy = recentResults.length ? Math.round(recentResults.filter(result => result.correct).length / recentResults.length * 100) : 0;
+  const stageCounts = StudyEngine.STAGES.map(meta => ({
+    ...meta,
+    count: Object.values(questionProgress).filter(item => item.stage === meta.stage).length
+  }));
+  const trendDates = Array.from({ length: 14 }, (_, index) => StudyEngine.addDays(date, index - 13));
+  const trend = trendDates.map(trendDate => {
+    const results = dailyStudyRecords.find(record => record.date === trendDate)?.results || [];
+    return { date: trendDate, total: results.length, wrong: results.filter(result => !result.correct).length };
+  });
+  const maxTrend = Math.max(1, ...trend.map(item => item.total));
+  const suggestions = [];
+  if (overview.due > studyPlan.dailyTotalLimit) suggestions.push(`当前有 ${overview.due} 道到期题，超过每日总上限。近期先保持复习优先，新题会自动减少。`);
+  if (weak[0]) suggestions.push(`“${weak[0].chapter}”是当前最薄弱章节，掌握度 ${weak[0].mastery}%。建议优先完成系统安排的该章节复习。`);
+  if (overview.coverage < 100) suggestions.push(`首轮还剩 ${overview.unseen} 道新题。保持每日上限，系统会根据到期复习占用动态调整新题量。`);
+  if (!suggestions.length) suggestions.push('当前没有明显积压。继续按到期任务复习，保持间隔正确率即可。');
+  const nextGoal = overview.coverage < 100
+    ? `先完成剩余 ${overview.unseen} 道题的首轮覆盖`
+    : (overview.mastered < overview.total ? `把 ${overview.total - overview.mastered} 道未稳定掌握题推进到阶段 5` : '维持全部题目的长期复习节奏');
+
+  container.innerHTML = `
+    <div class="page-heading analysis-heading"><div><h1>学习分析</h1><p>区分“还没学”和“学过但薄弱”，所有结论都来自本机正式记录。</p></div><button type="button" class="btn btn-primary" data-page="today">返回今日任务</button></div>
+    <section class="analysis-overview" aria-label="学习概览">
+      <div class="analysis-primary"><span>已学习题目掌握度</span><strong>${overview.mastery}%</strong><p>仅对已学习题目取阶段均值；整套题库覆盖率为 ${overview.coverage}%。</p></div>
+      <dl><div><dt>已学习</dt><dd>${overview.learned} / ${overview.total}</dd></div><div><dt>阶段 5 掌握</dt><dd>${overview.mastered}</dd></div><div><dt>当前到期</dt><dd>${overview.due}</dd></div><div><dt>近 30 天正确率</dt><dd>${recentResults.length ? `${accuracy}%` : '暂无记录'}</dd></div></dl>
+    </section>
+
+    <div class="analysis-two-column">
+      <section class="analysis-section stage-section"><div class="section-title-row"><div><h2>掌握阶段分布</h2><p>答对并经过间隔复习，题目才会逐步升级。</p></div></div><div class="stage-distribution">${stageCounts.map(item => `<div><span><i class="stage-dot stage-${item.stage}"></i>${item.label}</span><div class="stage-bar"><i style="width:${overview.total ? item.count / overview.total * 100 : 0}%"></i></div><strong>${item.count}</strong></div>`).join('')}</div></section>
+      <section class="analysis-section next-goal-section"><div class="section-title-row"><div><h2>下一阶段目标</h2><p>根据覆盖率、掌握度和积压自动更新。</p></div></div><strong>${esc(nextGoal)}</strong><ul>${suggestions.map(item => `<li>${icon('arrow_right')} ${esc(item)}</li>`).join('')}</ul></section>
+    </div>
+
+    <section class="analysis-section trend-section"><div class="section-title-row"><div><h2>最近 14 天作答与错误趋势</h2><p>包含计划学习、章节练习和模拟考试的正式作答结果。</p></div><span>${recentResults.length} 次作答记录</span></div><div class="trend-chart" role="img" aria-label="最近十四天作答量和错误量趋势">${trend.map(item => `<div class="trend-day"><div class="trend-bar"><span class="trend-total" style="height:${Math.max(item.total ? 8 : 0, item.total / maxTrend * 100)}%"></span><span class="trend-wrong" style="height:${Math.max(item.wrong ? 8 : 0, item.wrong / maxTrend * 100)}%"></span></div><strong>${item.total}</strong><span>${item.date.slice(5).replace('-', '/')}</span></div>`).join('')}</div><div class="load-legend"><span><i class="is-review"></i>总作答</span><span><i class="is-wrong"></i>错误</span></div></section>
+
+    <section class="analysis-section weak-analysis-section"><div class="section-title-row"><div><h2>薄弱章节</h2><p>综合章节掌握度、近 30 天正确率和到期积压；至少学习 5 道后参与排名。</p></div><span>${weak.length} 个可分析章节</span></div>${weak.length ? `<div class="weak-analysis-list">${weak.map((item, index) => `<div class="weak-analysis-row"><span class="weak-rank">${index + 1}</span><div class="weak-analysis-name"><strong>${esc(item.chapter)}</strong><span>已学 ${item.learned}/${item.total} · 到期 ${item.overdue} 道</span></div><div class="weak-analysis-measure"><span>正确率 <strong>${item.accuracy}%</strong></span><span>掌握度 <strong>${item.mastery}%</strong></span></div><button type="button" class="btn btn-sm" data-review-chapter="${escAttr(item.chapter)}">练习本章</button></div>`).join('')}</div>` : '<div class="inline-empty">再完成一些计划任务后，系统会生成可信的章节薄弱排名。</div>'}</section>`;
+
+  container.querySelectorAll('[data-review-chapter]').forEach(button => {
+    button.addEventListener('click', () => {
+      const questions = questionBank.filter(question => question.chapter === button.dataset.reviewChapter);
+      startQuiz(questions, button.dataset.reviewChapter);
+    });
+  });
 }
 
 /* ================================================================
@@ -1243,7 +1993,7 @@ function submitQuiz() {
     const isCorrect = q.type === 'fill'
       ? isFillAnswerCorrect(userAnswer, q.answer, q.answerOrder)
       : JSON.stringify([...userAnswer].sort()) === JSON.stringify([...q.answer].sort());
-    if (isCorrect) { correct++; } else { wrong++; addToErrorBook(q.id); }
+    if (isCorrect) { correct++; } else { wrong++; addToErrorBook(q.id, false); }
     return { ...q, userAnswer, isCorrect, userDisplayLetters };
   });
 
@@ -1251,7 +2001,28 @@ function submitQuiz() {
   quizState.wrong = wrong;
   quizState.results = results;
 
+  recordIncidentalResults(results, quizState.chapter === '模拟考试' ? 'exam' : 'practice');
+
   showQuizResult(results);
+}
+
+async function recordIncidentalResults(results, mode) {
+  const date = studyToday();
+  results.forEach(result => {
+    const id = String(result.id);
+    const previous = questionProgress[id] || StudyEngine.createProgress(id);
+    questionProgress[id] = StudyEngine.applyIncidentalResult(previous, {
+      correct: result.isCorrect,
+      date
+    });
+  });
+  const record = getDailyStudyRecord(date, true);
+  record.results = (record.results || []).concat(results.map(result => ({
+    questionId: String(result.id),
+    correct: Boolean(result.isCorrect),
+    mode
+  })));
+  await persistStudyState();
 }
 
 function showQuizResult(results) {
@@ -1823,7 +2594,7 @@ function getChapters() {
   return [...new Set(questionBank.map(q => q.chapter))].sort(compareChapterNames);
 }
 
-function addToErrorBook(questionId) {
+function addToErrorBook(questionId, shouldPersist = true) {
   const entry = errorBook.find(e => e.questionId === questionId);
   if (entry) {
     entry.wrongCount++;
@@ -1835,7 +2606,7 @@ function addToErrorBook(questionId) {
       lastWrong: new Date().toISOString().slice(0, 10)
     });
   }
-  persist();
+  if (shouldPersist) persist();
 }
 
 function downloadJSON(filename, data) {
@@ -1922,7 +2693,7 @@ function initAppShell() {
     icons: [{
       src: 'data:image/svg+xml,' + encodeURIComponent(
         '<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192">' +
-        '<rect width="192" height="192" rx="38" fill="#4f46e5"/>' +
+        '<rect width="192" height="192" rx="38" fill="#007c72"/>' +
         '<text x="96" y="122" font-size="105" fill="white" text-anchor="middle" font-family="sans-serif">📝</text>' +
         '</svg>'
       ),
@@ -1932,7 +2703,7 @@ function initAppShell() {
     }, {
       src: 'data:image/svg+xml,' + encodeURIComponent(
         '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">' +
-        '<rect width="512" height="512" rx="102" fill="#4f46e5"/>' +
+        '<rect width="512" height="512" rx="102" fill="#007c72"/>' +
         '<text x="256" y="330" font-size="280" fill="white" text-anchor="middle" font-family="sans-serif">📝</text>' +
         '</svg>'
       ),

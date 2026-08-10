@@ -1,7 +1,7 @@
 /* ================================================================
    Service Worker — 刷题助手离线缓存
    ================================================================ */
-const CACHE_NAME = 'quiz-app-v28';
+const CACHE_NAME = 'quiz-app-v31';
 
 const questionImageUrls = [
   './assets/question-images/JXSJ-02-006.webp',
@@ -44,6 +44,7 @@ const coreUrls = [
   './index.html',
   './styles.css',
   './stitch-ui.css',
+  './study-engine.js',
   './app.js',
   './data/default-questions.js',
   ...questionImageUrls
