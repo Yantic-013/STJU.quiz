@@ -1591,7 +1591,7 @@ function renderPlanSettings(container) {
       </form>
       <aside class="plan-rules-panel"><h2>当前排题规则</h2><dl><div><dt>计划范围</dt><dd>当前整套题库 ${questionBank.length} 道</dd></div><div><dt>章节优先</dt><dd>${normalizedPriorityChapters().length ? `优先推进已选 ${normalizedPriorityChapters().length} 个章节的新题` : '未指定，按题库章节顺序推进新题'}</dd></div><div><dt>复习顺序</dt><dd>预计遗忘风险、到期时间和最近答错综合排序</dd></div><div><dt>动态间隔</dt><dd>根据每题难度、记忆稳定度和实际遗忘表现调整</dd></div><div><dt>主观反馈</dt><dd>每天结束时只标记仍不熟练的正确题</dd></div><div><dt>漏做处理</dt><dd>保持每日上限，预计完成日期顺延</dd></div></dl><button type="button" class="text-button" data-page="analysis">查看掌握阶段与分析</button></aside>
     </div>
-    <section class="plan-reset-zone"><div><h2>重新开始学习计划</h2><p>清空掌握度、每日记录和未完成会话；题库、错题集与收藏不会删除，旧错题会重新作为初始弱项。</p></div><button type="button" class="btn btn-destructive" id="btnResetStudyPlan">重新开始计划</button></section>`;
+    <section class="plan-reset-zone"><div><h2>删除并重新建立计划</h2><p>删除当前计划、掌握度、每日记录和未完成会话，并返回建立计划页面；题库、错题集与收藏会保留。</p></div><button type="button" class="btn btn-destructive" id="btnResetStudyPlan">删除当前计划</button></section>`;
 
   bindPriorityChapterPicker('settingsPriorityChapters');
   $id('planSettingsForm').addEventListener('submit', async event => {
@@ -1609,17 +1609,17 @@ function renderPlanSettings(container) {
   });
   $id('btnResetStudyPlan').addEventListener('click', async () => {
     const confirmed = await showConfirmDialog({
-      title: '重新开始学习计划？',
-      message: '掌握度、每日完成记录和未完成会话将被清空，且无法撤销。题库、错题集和收藏会保留。',
-      confirmText: '清空并重新开始',
+      title: '删除当前学习计划？',
+      message: '当前计划、掌握度、每日完成记录和未完成会话将被清空，并返回建立计划页面。题库、错题集和收藏会保留。',
+      confirmText: '删除并重新建立',
       cancelText: '保留当前计划',
       danger: true
     });
     if (!confirmed) return;
-    questionProgress = StudyEngine.reconcileProgress(questionBank.map(question => question.id), {}, errorBook, date);
+    questionProgress = StudyEngine.reconcileProgress(questionBank.map(question => question.id), {}, [], date);
     dailyStudyRecords = [];
     activeStudySession = null;
-    studyPlan = { ...studyPlan, startDate: date, createdAt: new Date().toISOString(), updatedAt: null };
+    studyPlan = null;
     await persistStudyState();
     navigateTo('today');
   });
