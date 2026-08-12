@@ -1591,7 +1591,7 @@ function renderPlanSettings(container) {
       </form>
       <aside class="plan-rules-panel"><h2>当前排题规则</h2><dl><div><dt>计划范围</dt><dd>当前整套题库 ${questionBank.length} 道</dd></div><div><dt>章节优先</dt><dd>${normalizedPriorityChapters().length ? `优先推进已选 ${normalizedPriorityChapters().length} 个章节的新题` : '未指定，按题库章节顺序推进新题'}</dd></div><div><dt>复习顺序</dt><dd>预计遗忘风险、到期时间和最近答错综合排序</dd></div><div><dt>动态间隔</dt><dd>根据每题难度、记忆稳定度和实际遗忘表现调整</dd></div><div><dt>主观反馈</dt><dd>每天结束时只标记仍不熟练的正确题</dd></div><div><dt>漏做处理</dt><dd>保持每日上限，预计完成日期顺延</dd></div></dl><button type="button" class="text-button" data-page="analysis">查看掌握阶段与分析</button></aside>
     </div>
-    <section class="plan-reset-zone"><div><h2>删除并重新建立计划</h2><p>删除当前计划、掌握度、每日记录和未完成会话，并返回建立计划页面；题库、错题集与收藏会保留。</p></div><button type="button" class="btn btn-destructive" id="btnResetStudyPlan">删除当前计划</button></section>`;
+    <section class="plan-reset-zone"><div><h2>重新开始学习计划</h2><p>把当前设备上的学习状态恢复成新用户：清空今天及以前的答题记录、掌握度、错题、收藏和当前计划。题库、题图、访问口令与界面设置会保留。</p></div><button type="button" class="btn btn-destructive" id="btnResetStudyPlan">清空记录并重新开始</button></section>`;
 
   bindPriorityChapterPicker('settingsPriorityChapters');
   $id('planSettingsForm').addEventListener('submit', async event => {
@@ -1609,16 +1609,19 @@ function renderPlanSettings(container) {
   });
   $id('btnResetStudyPlan').addEventListener('click', async () => {
     const confirmed = await showConfirmDialog({
-      title: '删除当前学习计划？',
-      message: '当前计划、掌握度、每日完成记录和未完成会话将被清空，并返回建立计划页面。题库、错题集和收藏会保留。',
-      confirmText: '删除并重新建立',
-      cancelText: '保留当前计划',
+      title: '清空全部学习记录？',
+      message: '今天及以前做过的题、掌握度、错题、收藏、每日记录、未完成会话和当前计划都会永久清空。题库、题图、访问口令与界面设置会保留。',
+      confirmText: '全部清空并重新开始',
+      cancelText: '保留我的记录',
       danger: true
     });
     if (!confirmed) return;
+    errorBook = [];
+    bookmarks = [];
     questionProgress = StudyEngine.reconcileProgress(questionBank.map(question => question.id), {}, [], date);
     dailyStudyRecords = [];
     activeStudySession = null;
+    quizState = null;
     studyPlan = null;
     await persistStudyState();
     navigateTo('today');
