@@ -1,7 +1,7 @@
 /* ================================================================
    Service Worker — 刷题助手离线缓存
    ================================================================ */
-const CACHE_NAME = 'quiz-app-v34';
+const CACHE_NAME = 'quiz-app-v37';
 
 const questionImageUrls = [
   './assets/question-images/JXSJ-02-006.webp',

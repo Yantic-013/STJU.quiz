@@ -399,6 +399,34 @@ async function initData() {
       migrated = true;
     }
 
+    // v18：升级为基于难度、记忆稳定度和回忆概率的自适应复习模型。
+    if ((parseInt(String(settings.dbVersion || '').replace(/\D/g, ''), 10) || 0) < 18) {
+      questionProgress = StudyEngine.reconcileProgress(
+        questionBank.map(question => question.id),
+        questionProgress,
+        errorBook,
+        StudyEngine.dateKey()
+      );
+      studySettings = { ...studySettings, memoryModel: 'adaptive-dsr-v2', targetRetention: 0.9 };
+      settings.dbVersion = 'v18';
+      migrated = true;
+    }
+
+    // v19：允许优先选择当前正在复习的章节；未选择时保持原题库顺序。
+    if ((parseInt(String(settings.dbVersion || '').replace(/\D/g, ''), 10) || 0) < 19) {
+      if (studyPlan) {
+        const validChapters = new Set(questionBank.map(question => question.chapter));
+        studyPlan = {
+          ...studyPlan,
+          version: 2,
+          priorityChapters: [...new Set(Array.isArray(studyPlan.priorityChapters) ? studyPlan.priorityChapters : [])]
+            .filter(chapter => validChapters.has(chapter))
+        };
+      }
+      settings.dbVersion = 'v19';
+      migrated = true;
+    }
+
     syncStudyProgress();
     if (rollOverStaleStudySession()) migrated = true;
 
@@ -617,7 +645,7 @@ function renderManage(container) {
   $id('btnChooseImages').addEventListener('click', () => $id('imageInput').click());
   $id('imageInput').addEventListener('change', handleImageImport);
   $id('btnExport').addEventListener('click', () => downloadJSON('quiz-app-backup.json', {
-    version: 17,
+    version: 19,
     exportedAt: new Date().toISOString(),
     questionBank,
     errorBook,
@@ -939,6 +967,105 @@ function completedStudyDayCount() {
   return dailyStudyRecords.filter(record => record.completedAt).length;
 }
 
+function normalizedPriorityChapters(plan = studyPlan) {
+  const valid = new Set(getChapters());
+  return [...new Set(Array.isArray(plan?.priorityChapters) ? plan.priorityChapters : [])]
+    .filter(chapter => valid.has(chapter));
+}
+
+function schedulingStudyPlan(plan = studyPlan) {
+  const priorityChapters = normalizedPriorityChapters(plan);
+  if (!priorityChapters.length) return plan;
+  const chapterRank = new Map(priorityChapters.map((chapter, index) => [chapter, index]));
+  const priorityQuestionIds = questionBank
+    .map((question, index) => ({ question, index }))
+    .filter(item => chapterRank.has(item.question.chapter))
+    .sort((a, b) => chapterRank.get(a.question.chapter) - chapterRank.get(b.question.chapter) || a.index - b.index)
+    .map(item => String(item.question.id));
+  return { ...plan, priorityQuestionIds };
+}
+
+function priorityChapterShortLabel(chapter) {
+  const parts = String(chapter).split(' - ');
+  return parts.length > 1 ? parts.slice(1).join(' - ') : parts[0];
+}
+
+function priorityChapterPickerMarkup(controlId, selectedChapters = []) {
+  const selected = new Set(selectedChapters);
+  const progress = StudyEngine.overview(questionBank.map(question => question.id), questionProgress, studyToday());
+  const groups = new Map();
+  getChapters().forEach(chapter => {
+    const [parent] = String(chapter).split(' - ');
+    if (!groups.has(parent)) groups.set(parent, []);
+    groups.get(parent).push(chapter);
+  });
+  return `
+    <fieldset class="chapter-priority-fieldset" id="${controlId}">
+      <legend>优先学习章节</legend>
+      <div class="chapter-priority-heading">
+        <div><strong>同步你当前的复习范围</strong><p>新题优先从勾选章节安排；其他章节的到期复习仍会保留。</p></div>
+        <span class="chapter-priority-count" aria-live="polite">${selected.size ? `已选择 ${selected.size} 个` : '未选择（按题库顺序）'}</span>
+      </div>
+      <div class="chapter-priority-toolbar">
+        <button type="button" class="text-button" data-priority-action="all">全选</button>
+        <button type="button" class="text-button" data-priority-action="clear">清空</button>
+      </div>
+      <div class="chapter-priority-groups">
+        ${[...groups.entries()].map(([parent, chapters]) => `
+          <section class="chapter-priority-group">
+            <div class="chapter-priority-group-heading"><strong>${esc(parent)}</strong><button type="button" class="text-button" data-priority-group="${escAttr(parent)}">选择本组</button></div>
+            <div class="chapter-priority-options">
+              ${chapters.map(chapter => {
+                const questions = questionBank.filter(question => question.chapter === chapter);
+                const learned = questions.filter(question => questionProgress[String(question.id)]?.stage > 0).length;
+                const checked = selected.has(chapter);
+                return `<label class="chapter-priority-option ${checked ? 'is-selected' : ''}"><input type="checkbox" value="${escAttr(chapter)}" data-parent="${escAttr(parent)}" ${checked ? 'checked' : ''}><span><strong>${esc(priorityChapterShortLabel(chapter))}</strong><small>${questions.length} 题${progress.learned ? ` · 已学 ${learned}` : ''}</small></span></label>`;
+              }).join('')}
+            </div>
+          </section>`).join('')}
+      </div>
+    </fieldset>`;
+}
+
+function bindPriorityChapterPicker(controlId) {
+  const root = $id(controlId);
+  if (!root) return;
+  const checkboxes = () => [...root.querySelectorAll('input[type="checkbox"]')];
+  const update = () => {
+    const inputs = checkboxes();
+    const selectedCount = inputs.filter(input => input.checked).length;
+    root.querySelector('.chapter-priority-count').textContent = selectedCount
+      ? `已选择 ${selectedCount} 个`
+      : '未选择（按题库顺序）';
+    inputs.forEach(input => input.closest('.chapter-priority-option')?.classList.toggle('is-selected', input.checked));
+    root.querySelectorAll('[data-priority-group]').forEach(button => {
+      const groupInputs = inputs.filter(input => input.dataset.parent === button.dataset.priorityGroup);
+      button.textContent = groupInputs.length && groupInputs.every(input => input.checked) ? '取消本组' : '选择本组';
+    });
+  };
+  root.addEventListener('change', update);
+  root.addEventListener('click', event => {
+    const action = event.target.closest('[data-priority-action]')?.dataset.priorityAction;
+    if (action) {
+      checkboxes().forEach(input => { input.checked = action === 'all'; });
+      update();
+      return;
+    }
+    const groupButton = event.target.closest('[data-priority-group]');
+    if (!groupButton) return;
+    const groupInputs = checkboxes().filter(input => input.dataset.parent === groupButton.dataset.priorityGroup);
+    const nextChecked = !groupInputs.every(input => input.checked);
+    groupInputs.forEach(input => { input.checked = nextChecked; });
+    update();
+  });
+  update();
+}
+
+function readPriorityChapters(controlId) {
+  const root = $id(controlId);
+  return root ? [...root.querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value) : [];
+}
+
 function planScheduleForToday() {
   const date = studyToday();
   if (activeStudySession?.date === date && activeStudySession.items?.length) {
@@ -959,7 +1086,7 @@ function planScheduleForToday() {
   }
   const record = getDailyStudyRecord(date);
   return StudyEngine.scheduleDay(
-    studyPlan,
+    schedulingStudyPlan(),
     questionBank.map(question => question.id),
     questionProgress,
     date,
@@ -987,16 +1114,18 @@ function renderTodayPage(container) {
   const record = getDailyStudyRecord(date);
   const dayComplete = Boolean(record?.completedAt);
   const schedule = planScheduleForToday();
+  const scheduledPlan = schedulingStudyPlan();
+  const priorityChapters = normalizedPriorityChapters();
   const overview = StudyEngine.overview(questionBank.map(question => question.id), questionProgress, date);
-  const firstPassDate = StudyEngine.forecastFirstPass(studyPlan, questionBank.map(question => question.id), questionProgress, date);
+  const firstPassDate = StudyEngine.forecastFirstPass(scheduledPlan, questionBank.map(question => question.id), questionProgress, date);
   const masteryDate = StudyEngine.forecastMastery(
-    studyPlan,
+    scheduledPlan,
     questionBank.map(question => question.id),
     questionProgress,
     date,
     completedStudyDayCount()
   );
-  const loads = StudyEngine.forecastLoad(studyPlan, questionBank.map(question => question.id), questionProgress, date, 7);
+  const loads = StudyEngine.forecastLoad(scheduledPlan, questionBank.map(question => question.id), questionProgress, date, 7);
   const weak = StudyEngine.weakChapters(questionBank, questionProgress, dailyStudyRecords, date).slice(0, 3);
   const maxLoad = Math.max(1, ...loads.map(item => item.total));
   const activeAnswered = activeStudySession?.date === date
@@ -1018,6 +1147,8 @@ function renderTodayPage(container) {
       <div><h1>今日学习</h1><p>${friendlyStudyDate(date, true)} · 按到期复习优先安排，未完成任务会保持负担并自动顺延。</p></div>
       <button type="button" class="btn btn-secondary" data-page="plan-settings">${icon('tune')} 调整计划</button>
     </div>
+
+    ${priorityChapters.length ? `<div class="today-priority-summary"><span>${icon('bookmark')} 优先章节</span><div>${priorityChapters.slice(0, 3).map(chapter => `<strong>${esc(priorityChapterShortLabel(chapter))}</strong>`).join('')}${priorityChapters.length > 3 ? `<strong>+${priorityChapters.length - 3}</strong>` : ''}</div><p>新题先从这些章节安排，全库到期复习照常保留。</p><button type="button" class="text-button" data-page="plan-settings">调整</button></div>` : ''}
 
     <section class="today-command ${dayComplete ? 'is-complete' : ''}" aria-labelledby="todayTaskTitle">
       <div class="today-command-main">
@@ -1113,12 +1244,14 @@ function renderPlanSetup(container) {
           <label class="study-field"><span>每日新题上限</span><input class="input" type="number" id="planNewLimit" min="1" max="200" value="${recommendedNew}" required><small>只限制第一次学习的题目。</small></label>
           <label class="study-field"><span>每日总题量上限</span><input class="input" type="number" id="planTotalLimit" min="1" max="300" value="30" required><small>新题与复习题合计。</small></label>
         </div>
+        ${priorityChapterPickerMarkup('planPriorityChapters')}
         ${legacyCount ? `<div class="plan-migration-note">${icon('history')} 检测到 ${legacyCount} 道旧错题。它们会作为初始弱项进入复习，但不会生成虚假的历史正确率。</div>` : ''}
         <div class="form-message" id="planFormMessage" role="alert"></div>
         <button type="submit" class="btn btn-primary plan-create-button">创建学习计划 ${icon('arrow_forward')}</button>
       </form>
     </div>`;
 
+  bindPriorityChapterPicker('planPriorityChapters');
   $id('planSetupForm').addEventListener('submit', async event => {
     event.preventDefault();
     const targetDate = $id('planTargetDate').value;
@@ -1131,13 +1264,14 @@ function renderPlanSetup(container) {
       return;
     }
     studyPlan = {
-      version: 1,
+      version: 2,
       enabled: true,
       createdAt: new Date().toISOString(),
       startDate: date,
       targetDate,
       dailyNewLimit,
       dailyTotalLimit,
+      priorityChapters: readPriorityChapters('planPriorityChapters'),
       initialQuestionCount: questionBank.length
     };
     studySettings = { ...studySettings, reviewPriority: true, stableDailyLoad: true };
@@ -1170,7 +1304,7 @@ async function startTodayStudy() {
   if (getDailyStudyRecord(date)?.completedAt) return;
   if (activeStudySession?.date !== date || !activeStudySession.items?.length) {
     const schedule = StudyEngine.scheduleDay(
-      studyPlan,
+      schedulingStudyPlan(),
       questionBank.map(question => question.id),
       questionProgress,
       date
@@ -1451,13 +1585,15 @@ function renderPlanSettings(container) {
         <div class="form-heading"><h2>首轮目标与每日上限</h2><p>到期复习始终优先；复习超过总量时，新题会自动减少到 0。</p></div>
         <label class="study-field"><span>首轮目标日期</span><input class="input" type="date" id="settingsTargetDate" min="${date}" value="${studyPlan.targetDate}" required></label>
         <div class="study-field-row"><label class="study-field"><span>每日新题上限</span><input class="input" type="number" id="settingsNewLimit" min="1" max="200" value="${studyPlan.dailyNewLimit}" required></label><label class="study-field"><span>每日总题量上限</span><input class="input" type="number" id="settingsTotalLimit" min="1" max="300" value="${studyPlan.dailyTotalLimit}" required></label></div>
+        ${priorityChapterPickerMarkup('settingsPriorityChapters', normalizedPriorityChapters())}
         <div class="form-message" id="settingsFormMessage" role="alert"></div>
         <button type="submit" class="btn btn-primary">保存计划设置</button>
       </form>
-      <aside class="plan-rules-panel"><h2>当前排题规则</h2><dl><div><dt>计划范围</dt><dd>当前整套题库 ${questionBank.length} 道</dd></div><div><dt>复习顺序</dt><dd>逾期更久、阶段更低、最近答错优先</dd></div><div><dt>主观反馈</dt><dd>每天结束时只标记仍不熟练的正确题</dd></div><div><dt>漏做处理</dt><dd>保持每日上限，预计完成日期顺延</dd></div></dl><button type="button" class="text-button" data-page="analysis">查看掌握阶段与分析</button></aside>
+      <aside class="plan-rules-panel"><h2>当前排题规则</h2><dl><div><dt>计划范围</dt><dd>当前整套题库 ${questionBank.length} 道</dd></div><div><dt>章节优先</dt><dd>${normalizedPriorityChapters().length ? `优先推进已选 ${normalizedPriorityChapters().length} 个章节的新题` : '未指定，按题库章节顺序推进新题'}</dd></div><div><dt>复习顺序</dt><dd>预计遗忘风险、到期时间和最近答错综合排序</dd></div><div><dt>动态间隔</dt><dd>根据每题难度、记忆稳定度和实际遗忘表现调整</dd></div><div><dt>主观反馈</dt><dd>每天结束时只标记仍不熟练的正确题</dd></div><div><dt>漏做处理</dt><dd>保持每日上限，预计完成日期顺延</dd></div></dl><button type="button" class="text-button" data-page="analysis">查看掌握阶段与分析</button></aside>
     </div>
     <section class="plan-reset-zone"><div><h2>重新开始学习计划</h2><p>清空掌握度、每日记录和未完成会话；题库、错题集与收藏不会删除，旧错题会重新作为初始弱项。</p></div><button type="button" class="btn btn-destructive" id="btnResetStudyPlan">重新开始计划</button></section>`;
 
+  bindPriorityChapterPicker('settingsPriorityChapters');
   $id('planSettingsForm').addEventListener('submit', async event => {
     event.preventDefault();
     const dailyNewLimit = Number($id('settingsNewLimit').value);
@@ -1467,7 +1603,7 @@ function renderPlanSettings(container) {
       $id('settingsTotalLimit').focus();
       return;
     }
-    studyPlan = { ...studyPlan, targetDate: $id('settingsTargetDate').value, dailyNewLimit, dailyTotalLimit, updatedAt: new Date().toISOString() };
+    studyPlan = { ...studyPlan, version: 2, targetDate: $id('settingsTargetDate').value, dailyNewLimit, dailyTotalLimit, priorityChapters: readPriorityChapters('settingsPriorityChapters'), updatedAt: new Date().toISOString() };
     await persistStudyState();
     navigateTo('today');
   });
@@ -1512,6 +1648,7 @@ function renderLearningAnalysis(container) {
   const maxTrend = Math.max(1, ...trend.map(item => item.total));
   const suggestions = [];
   if (overview.due > studyPlan.dailyTotalLimit) suggestions.push(`当前有 ${overview.due} 道到期题，超过每日总上限。近期先保持复习优先，新题会自动减少。`);
+  if (overview.learned > 0 && overview.retention < 85) suggestions.push(`当前预计记忆保持率为 ${overview.retention}%。优先完成低回忆概率题目，可以更快降低遗忘风险。`);
   if (weak[0]) suggestions.push(`“${weak[0].chapter}”是当前最薄弱章节，掌握度 ${weak[0].mastery}%。建议优先完成系统安排的该章节复习。`);
   if (overview.coverage < 100) suggestions.push(`首轮还剩 ${overview.unseen} 道新题。保持每日上限，系统会根据到期复习占用动态调整新题量。`);
   if (!suggestions.length) suggestions.push('当前没有明显积压。继续按到期任务复习，保持间隔正确率即可。');
@@ -1520,20 +1657,20 @@ function renderLearningAnalysis(container) {
     : (overview.mastered < overview.total ? `把 ${overview.total - overview.mastered} 道未稳定掌握题推进到阶段 5` : '维持全部题目的长期复习节奏');
 
   container.innerHTML = `
-    <div class="page-heading analysis-heading"><div><h1>学习分析</h1><p>区分“还没学”和“学过但薄弱”，所有结论都来自本机正式记录。</p></div><button type="button" class="btn btn-primary" data-page="today">返回今日任务</button></div>
+    <div class="page-heading analysis-heading"><div><h1>学习分析</h1><p>自适应模型会结合每题难度、记忆稳定度和当前回忆概率，区分“还没学”和“正在遗忘”。</p></div><button type="button" class="btn btn-primary" data-page="today">返回今日任务</button></div>
     <section class="analysis-overview" aria-label="学习概览">
-      <div class="analysis-primary"><span>已学习题目掌握度</span><strong>${overview.mastery}%</strong><p>仅对已学习题目取阶段均值；整套题库覆盖率为 ${overview.coverage}%。</p></div>
-      <dl><div><dt>已学习</dt><dd>${overview.learned} / ${overview.total}</dd></div><div><dt>阶段 5 掌握</dt><dd>${overview.mastered}</dd></div><div><dt>当前到期</dt><dd>${overview.due}</dd></div><div><dt>近 30 天正确率</dt><dd>${recentResults.length ? `${accuracy}%` : '暂无记录'}</dd></div></dl>
+      <div class="analysis-primary"><span>已学习题目掌握度</span><strong>${overview.mastery}%</strong><p>整套题库覆盖率 ${overview.coverage}%；当前预计记忆保持率 ${overview.retention}%。</p></div>
+      <dl><div><dt>已学习</dt><dd>${overview.learned} / ${overview.total}</dd></div><div><dt>阶段 5 掌握</dt><dd>${overview.mastered}</dd></div><div><dt>预计保持率</dt><dd>${overview.learned ? `${overview.retention}%` : '暂无记录'}</dd></div><div><dt>当前到期</dt><dd>${overview.due}</dd></div><div><dt>近 30 天正确率</dt><dd>${recentResults.length ? `${accuracy}%` : '暂无记录'}</dd></div></dl>
     </section>
 
     <div class="analysis-two-column">
-      <section class="analysis-section stage-section"><div class="section-title-row"><div><h2>掌握阶段分布</h2><p>答对并经过间隔复习，题目才会逐步升级。</p></div></div><div class="stage-distribution">${stageCounts.map(item => `<div><span><i class="stage-dot stage-${item.stage}"></i>${item.label}</span><div class="stage-bar"><i style="width:${overview.total ? item.count / overview.total * 100 : 0}%"></i></div><strong>${item.count}</strong></div>`).join('')}</div></section>
+      <section class="analysis-section stage-section"><div class="section-title-row"><div><h2>掌握阶段分布</h2><p>阶段由每题的记忆稳定度决定；越难或越容易忘，升级越慢。</p></div></div><div class="stage-distribution">${stageCounts.map(item => `<div><span><i class="stage-dot stage-${item.stage}"></i>${item.label}</span><div class="stage-bar"><i style="width:${overview.total ? item.count / overview.total * 100 : 0}%"></i></div><strong>${item.count}</strong></div>`).join('')}</div></section>
       <section class="analysis-section next-goal-section"><div class="section-title-row"><div><h2>下一阶段目标</h2><p>根据覆盖率、掌握度和积压自动更新。</p></div></div><strong>${esc(nextGoal)}</strong><ul>${suggestions.map(item => `<li>${icon('arrow_right')} ${esc(item)}</li>`).join('')}</ul></section>
     </div>
 
     <section class="analysis-section trend-section"><div class="section-title-row"><div><h2>最近 14 天作答与错误趋势</h2><p>包含计划学习、章节练习和模拟考试的正式作答结果。</p></div><span>${recentResults.length} 次作答记录</span></div><div class="trend-chart" role="img" aria-label="最近十四天作答量和错误量趋势">${trend.map(item => `<div class="trend-day"><div class="trend-bar"><span class="trend-total" style="height:${Math.max(item.total ? 8 : 0, item.total / maxTrend * 100)}%"></span><span class="trend-wrong" style="height:${Math.max(item.wrong ? 8 : 0, item.wrong / maxTrend * 100)}%"></span></div><strong>${item.total}</strong><span>${item.date.slice(5).replace('-', '/')}</span></div>`).join('')}</div><div class="load-legend"><span><i class="is-review"></i>总作答</span><span><i class="is-wrong"></i>错误</span></div></section>
 
-    <section class="analysis-section weak-analysis-section"><div class="section-title-row"><div><h2>薄弱章节</h2><p>综合章节掌握度、近 30 天正确率和到期积压；至少学习 5 道后参与排名。</p></div><span>${weak.length} 个可分析章节</span></div>${weak.length ? `<div class="weak-analysis-list">${weak.map((item, index) => `<div class="weak-analysis-row"><span class="weak-rank">${index + 1}</span><div class="weak-analysis-name"><strong>${esc(item.chapter)}</strong><span>已学 ${item.learned}/${item.total} · 到期 ${item.overdue} 道</span></div><div class="weak-analysis-measure"><span>正确率 <strong>${item.accuracy}%</strong></span><span>掌握度 <strong>${item.mastery}%</strong></span></div><button type="button" class="btn btn-sm" data-review-chapter="${escAttr(item.chapter)}">练习本章</button></div>`).join('')}</div>` : '<div class="inline-empty">再完成一些计划任务后，系统会生成可信的章节薄弱排名。</div>'}</section>`;
+    <section class="analysis-section weak-analysis-section"><div class="section-title-row"><div><h2>薄弱章节</h2><p>综合章节掌握度、近 30 天正确率和预计记忆保持率；至少学习 5 道后参与排名。</p></div><span>${weak.length} 个可分析章节</span></div>${weak.length ? `<div class="weak-analysis-list">${weak.map((item, index) => `<div class="weak-analysis-row"><span class="weak-rank">${index + 1}</span><div class="weak-analysis-name"><strong>${esc(item.chapter)}</strong><span>已学 ${item.learned}/${item.total} · 到期 ${item.overdue} 道</span></div><div class="weak-analysis-measure"><span>正确率 <strong>${item.accuracy}%</strong></span><span>掌握度 <strong>${item.mastery}%</strong></span><span>保持率 <strong>${item.retention}%</strong></span></div><button type="button" class="btn btn-sm" data-review-chapter="${escAttr(item.chapter)}">练习本章</button></div>`).join('')}</div>` : '<div class="inline-empty">再完成一些计划任务后，系统会生成可信的章节薄弱排名。</div>'}</section>`;
 
   container.querySelectorAll('[data-review-chapter]').forEach(button => {
     button.addEventListener('click', () => {
