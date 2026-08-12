@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <script>
-  if (localStorage.getItem('quiz_access') !== 'true') {
+  if (localStorage.getItem('quiz_access') !== 'v2') {
     document.documentElement.classList.add('access-locked');
   }
 </script>
@@ -111,10 +111,18 @@
       return;
     }
 
-    form.addEventListener('submit', function(event) {
+    var accessCodeDigest = '7e58a93ca49dfa364e6d817d0d3b1d4164035b10c90986df38e7d12127e9004e';
+
+    form.addEventListener('submit', async function(event) {
       event.preventDefault();
-      if (password.value === '23014104') {
-        if (remember.checked) localStorage.setItem('quiz_access', 'true');
+      var inputBytes = new TextEncoder().encode(password.value);
+      var digestBuffer = await crypto.subtle.digest('SHA-256', inputBytes);
+      var inputDigest = Array.from(new Uint8Array(digestBuffer), function(byte) {
+        return byte.toString(16).padStart(2, '0');
+      }).join('');
+
+      if (inputDigest === accessCodeDigest) {
+        if (remember.checked) localStorage.setItem('quiz_access', 'v2');
         document.documentElement.classList.remove('access-locked');
         gate.hidden = true;
       } else {
