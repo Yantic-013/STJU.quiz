@@ -1028,15 +1028,15 @@ body.dark .explanation { background: #17302d; }
 .plan-setup-intro ul { display: grid; gap: var(--ui-space-sm); margin: var(--ui-space-xl) 0 0; padding: 0; list-style: none; }
 .plan-setup-intro li { display: flex; align-items: flex-start; gap: var(--ui-space-xs); font-size: var(--ui-text-meta); }
 .plan-setup-intro li .material-symbols-outlined { flex: 0 0 auto; font-size: 1.125rem; }
-.plan-setup-form, .plan-settings-form { align-self: center; padding: var(--ui-space-xl); border: 1px solid var(--ui-outline); border-radius: var(--ui-radius-lg); background: var(--ui-surface); }
+.plan-setup-form, .plan-settings-form { align-self: center; width: 100%; min-width: 0; padding: var(--ui-space-xl); border: 1px solid var(--ui-outline); border-radius: var(--ui-radius-lg); background: var(--ui-surface); }
 .form-heading { margin-bottom: var(--ui-space-lg); }
 .form-heading h2 { margin: 0; color: var(--ui-ink); font-size: var(--ui-text-dialog); }
 .form-heading p { max-width: 54ch; margin: var(--ui-space-xs) 0 0; color: var(--ui-muted); font-size: var(--ui-text-meta); line-height: 1.55; }
-.study-field { display: grid; gap: var(--ui-space-xs); margin-bottom: var(--ui-space-md); }
+.study-field { display: grid; min-width: 0; gap: var(--ui-space-xs); margin-bottom: var(--ui-space-md); }
 .study-field > span { color: var(--ui-ink); font-size: var(--ui-text-meta); font-weight: 600; }
-.study-field .input { width: 100%; min-height: 48px; font-size: var(--ui-text-body); }
+.study-field .input { display: block; width: 100%; min-width: 0; max-width: 100%; min-height: 48px; font-size: var(--ui-text-body); }
 .study-field small { color: var(--ui-muted); font-size: var(--ui-text-caption); line-height: 1.45; }
-.study-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ui-space-md); }
+.study-field-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-width: 0; gap: var(--ui-space-md); }
 .plan-migration-note { display: flex; align-items: flex-start; gap: var(--ui-space-xs); margin: var(--ui-space-xs) 0 var(--ui-space-md); padding: var(--ui-space-sm); border-radius: var(--ui-radius-sm); color: var(--ui-muted); background: var(--ui-warning-soft); font-size: var(--ui-text-meta); line-height: 1.5; }
 .plan-migration-note .material-symbols-outlined { flex: 0 0 auto; color: var(--ui-warning); }
 .form-message { min-height: 24px; margin-bottom: var(--ui-space-xs); color: var(--ui-error); font-size: var(--ui-text-meta); }
